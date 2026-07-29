@@ -22,14 +22,29 @@ class DetectionSession:
         self.items.clear()
         self.rules = SessionIgnoreRules()
 
+    def add_ignore_region(self, unit_index: int | None, bbox: BBox) -> None:
+        self.rules.ignored_regions.append((unit_index, bbox))
+
+    def _in_ignore_region(self, item: DetectionItem) -> bool:
+        cx = (item.bbox.x0 + item.bbox.x1) / 2
+        cy = (item.bbox.y0 + item.bbox.y1) / 2
+        for page, region in self.rules.ignored_regions:
+            if page is not None and page != item.unit_index:
+                continue
+            if region.x0 <= cx <= region.x1 and region.y0 <= cy <= region.y1:
+                return True
+        return False
+
     def add_items(self, items: list[DetectionItem], *, merge: bool = True) -> int:
-        """Add detections, skipping ignored types/texts and duplicates."""
+        """Add detections, skipping ignored types/texts/regions and duplicates."""
         added = 0
         for item in items:
             if item.pii_type in self.rules.ignored_types:
                 continue
             norm = item.text.strip().lower()
             if norm and norm in self.rules.ignored_texts:
+                continue
+            if self._in_ignore_region(item):
                 continue
             if merge and self._find_similar(item):
                 continue
@@ -122,6 +137,8 @@ class DetectionSession:
         pii_type: PiiType = PiiType.CUSTOM,
         text: str = "",
         mode: MaskMode = MaskMode.DELETE_AND_BOX,
+        pattern_id: str | None = None,
+        source: MaskSource = MaskSource.MANUAL,
     ) -> DetectionItem:
         item = DetectionItem(
             id=new_id(),
@@ -129,13 +146,38 @@ class DetectionSession:
             bbox=bbox,
             text=text or "(수동 마스킹)",
             pii_type=pii_type,
-            source=MaskSource.MANUAL,
+            source=source,
             status=DetectionStatus.CONFIRMED,
             confidence=1.0,
             mode=mode,
+            pattern_id=pattern_id,
         )
         self.items.append(item)
         return item
+
+    def apply_pattern_items(self, items: list[DetectionItem]) -> int:
+        """Append pattern-generated confirmed masks, skipping overlaps."""
+        return self.add_items(items, merge=True)
+
+    def rollback_pattern(self, pattern_id: str) -> int:
+        """Remove/cancel all items created by a pattern id."""
+        n = 0
+        remaining: list[DetectionItem] = []
+        for item in self.items:
+            if item.pattern_id == pattern_id and item.source == MaskSource.PATTERN:
+                n += 1
+                continue
+            remaining.append(item)
+        self.items = remaining
+        return n
+
+    def clear_page_masks(self, unit_index: int) -> int:
+        n = 0
+        for item in self.items:
+            if item.unit_index == unit_index and item.status == DetectionStatus.CONFIRMED:
+                item.status = DetectionStatus.CANCELLED
+                n += 1
+        return n
 
     def remove_item(self, item_id: str) -> None:
         self.items = [i for i in self.items if i.id != item_id]
@@ -158,6 +200,13 @@ class DetectionSession:
                 )
             )
         return out
+
+    def confirmed_on_page(self, unit_index: int) -> list[DetectionItem]:
+        return [
+            i
+            for i in self.items
+            if i.unit_index == unit_index and i.status == DetectionStatus.CONFIRMED
+        ]
 
     def filtered(
         self,
