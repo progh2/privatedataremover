@@ -26,13 +26,17 @@ from PySide6.QtWidgets import (
 )
 
 from privatedataremover import __version__
-from privatedataremover.core.adapters.base import BBox, PiiType
+from privatedataremover.core.adapters.base import BBox, MaskSource, PiiType
 from privatedataremover.core.adapters.pdf import PdfAdapter
-from privatedataremover.core.pii import DetectionStatus
+from privatedataremover.core.history import HistoryStack, restore_session, snapshot_from_session
+from privatedataremover.core.pattern import find_similar_pages, page_fingerprint
+from privatedataremover.core.pattern.apply import PatternProposal, SeedMask, build_pattern_items
+from privatedataremover.core.pii import DetectionStatus, new_id
 from privatedataremover.core.pii.pipeline import analyze_document
 from privatedataremover.core.pii.session import DetectionSession
 from privatedataremover.core.settings import AppSettings, load_settings, save_settings
 from privatedataremover.ui.detection_panel import DetectionPanel
+from privatedataremover.ui.pattern_dialog import PatternApplyDialog
 from privatedataremover.ui.pdf_view import PdfPreview
 from privatedataremover.ui.settings_dialog import SettingsDialog
 
@@ -47,9 +51,12 @@ class MainWindow(QMainWindow):
         self.settings: AppSettings = load_settings()
         self.adapter = PdfAdapter()
         self.session = DetectionSession()
+        self.history = HistoryStack()
         self._page_index = 0
         self._selected_id: str | None = None
         self._draw_mode = False
+        self._ignore_region_mode = False
+        self._last_pattern_id: str | None = None
 
         self.page_list = QListWidget()
         self.page_list.setMinimumWidth(140)
@@ -127,9 +134,32 @@ class MainWindow(QMainWindow):
         self.act_draw.setShortcut("M")
         self.act_draw.toggled.connect(self._toggle_draw_mode)
 
+        self.act_ignore_region = QAction("무시 영역 그리기", self)
+        self.act_ignore_region.setCheckable(True)
+        self.act_ignore_region.setToolTip("드래그한 영역은 이후 탐지에서 제외됩니다.")
+        self.act_ignore_region.toggled.connect(self._toggle_ignore_region_mode)
+
+        self.act_apply_pattern = QAction("비슷한 페이지에 적용…", self)
+        self.act_apply_pattern.setShortcut("Ctrl+Shift+A")
+        self.act_apply_pattern.triggered.connect(self.apply_pattern_to_similar)
+
+        self.act_rollback_pattern = QAction("마지막 패턴 적용 취소", self)
+        self.act_rollback_pattern.triggered.connect(self.rollback_last_pattern)
+
+        self.act_undo = QAction("실행 취소", self)
+        self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        self.act_undo.triggered.connect(self.undo)
+
+        self.act_redo = QAction("다시 실행", self)
+        self.act_redo.setShortcut(QKeySequence.StandardKey.Redo)
+        self.act_redo.triggered.connect(self.redo)
+
         self.act_delete = QAction("선택 마스킹 삭제", self)
         self.act_delete.setShortcut(QKeySequence.StandardKey.Delete)
         self.act_delete.triggered.connect(self._delete_selected)
+
+        self.act_clear_page = QAction("현재 페이지 마스킹 모두 지우기", self)
+        self.act_clear_page.triggered.connect(self._clear_page_masks)
 
         self.act_zoom_in = QAction("확대", self)
         self.act_zoom_in.setShortcut(QKeySequence.StandardKey.ZoomIn)
@@ -166,8 +196,16 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_exit)
 
         edit_menu = self.menuBar().addMenu("편집")
+        edit_menu.addAction(self.act_undo)
+        edit_menu.addAction(self.act_redo)
+        edit_menu.addSeparator()
         edit_menu.addAction(self.act_draw)
+        edit_menu.addAction(self.act_ignore_region)
         edit_menu.addAction(self.act_delete)
+        edit_menu.addAction(self.act_clear_page)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.act_apply_pattern)
+        edit_menu.addAction(self.act_rollback_pattern)
 
         view_menu = self.menuBar().addMenu("보기")
         view_menu.addAction(self.act_zoom_in)
@@ -193,7 +231,11 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.chk_use_ocr)
         bar.addWidget(self.chk_use_llm)
         bar.addSeparator()
+        bar.addAction(self.act_undo)
+        bar.addAction(self.act_redo)
         bar.addAction(self.act_draw)
+        bar.addAction(self.act_ignore_region)
+        bar.addAction(self.act_apply_pattern)
         bar.addAction(self.act_delete)
         bar.addSeparator()
         bar.addAction(self.act_prev)
@@ -227,6 +269,8 @@ class MainWindow(QMainWindow):
             return
 
         self.session.clear()
+        self.history.clear()
+        self._last_pattern_id = None
         self._selected_id = None
         self.page_list.clear()
         for unit in self.adapter.iter_units():
@@ -282,6 +326,7 @@ class MainWindow(QMainWindow):
             return
         progress.close()
 
+        self._push_history("analyze")
         added = self.session.add_items(result.items)
         msg_parts = [f"새 후보 {added}건 (전체 탐지 {len(result.items)}건)"]
         if result.used_ocr:
@@ -337,22 +382,134 @@ class MainWindow(QMainWindow):
         self._selected_id = item_id
         self._refresh_detection_ui()
 
+    def _push_history(self, label: str = "") -> None:
+        self.history.push(snapshot_from_session(self.session, label=label))
+
+    def undo(self) -> None:
+        current = snapshot_from_session(self.session)
+        prev = self.history.undo(current)
+        if prev is None:
+            self.statusBar().showMessage("되돌릴 작업이 없습니다.", 2000)
+            return
+        restore_session(self.session, prev)
+        self._selected_id = None
+        self._refresh_detection_ui()
+        self._update_status()
+
+    def redo(self) -> None:
+        current = snapshot_from_session(self.session)
+        nxt = self.history.redo(current)
+        if nxt is None:
+            self.statusBar().showMessage("다시 실행할 작업이 없습니다.", 2000)
+            return
+        restore_session(self.session, nxt)
+        self._selected_id = None
+        self._refresh_detection_ui()
+        self._update_status()
+
+    def apply_pattern_to_similar(self) -> None:
+        if self.adapter.page_count == 0:
+            QMessageBox.information(self, "패턴", "먼저 PDF를 열어 주세요.")
+            return
+        seeds = self.session.confirmed_on_page(self._page_index)
+        if not seeds:
+            QMessageBox.information(
+                self,
+                "패턴",
+                "현재 페이지에 확정/수동 마스킹이 없습니다.\n"
+                "먼저 마스크를 그린 뒤 다시 시도하세요.",
+            )
+            return
+
+        units = {u.index: u for u in self.adapter.iter_units()}
+        fingerprints: dict[int, str] = {}
+        for idx in units:
+            spans = list(self.adapter.extract_spans(idx))
+            fingerprints[idx] = page_fingerprint(spans, units[idx])
+
+        similar = find_similar_pages(fingerprints, self._page_index)
+        if not similar:
+            QMessageBox.information(
+                self,
+                "패턴",
+                "비슷한 페이지를 찾지 못했습니다.\n"
+                "레이아웃이 다른 문서이거나 텍스트가 거의 없을 수 있습니다.",
+            )
+            return
+
+        dlg = PatternApplyDialog(
+            seed_index=self._page_index,
+            seed_mask_count=len(seeds),
+            similar=similar,
+            parent=self,
+        )
+        if not dlg.exec():
+            return
+        targets = dlg.selected_pages()
+        if not targets:
+            return
+
+        pattern_id = new_id()
+        proposal = PatternProposal(
+            pattern_id=pattern_id,
+            seed_index=self._page_index,
+            target_indices=targets,
+            seeds=[
+                SeedMask(
+                    bbox=s.bbox,
+                    pii_type=s.pii_type,
+                    text=s.text,
+                    mode=s.mode.value,
+                )
+                for s in seeds
+            ],
+            coord_mode=dlg.coord_mode(),
+            scores={s.unit_index: s.score for s in similar},
+        )
+        items = build_pattern_items(proposal, units=units)
+        self._push_history("pattern_apply")
+        added = self.session.apply_pattern_items(items)
+        self._last_pattern_id = pattern_id
+        self._refresh_detection_ui()
+        self._update_status()
+        QMessageBox.information(
+            self,
+            "패턴 적용",
+            f"{len(targets)}개 페이지에 마스크 {added}개를 적용했습니다.\n"
+            "「마지막 패턴 적용 취소」또는 실행 취소로 되돌릴 수 있습니다.",
+        )
+
+    def rollback_last_pattern(self) -> None:
+        if not self._last_pattern_id:
+            QMessageBox.information(self, "패턴 취소", "취소할 패턴 적용이 없습니다.")
+            return
+        self._push_history("pattern_rollback")
+        n = self.session.rollback_pattern(self._last_pattern_id)
+        self._last_pattern_id = None
+        self._refresh_detection_ui()
+        self._update_status()
+        self.statusBar().showMessage(f"패턴 마스크 {n}개 제거", 3000)
+
     def _confirm_item(self, item_id: str) -> None:
+        self._push_history("confirm")
         self.session.confirm(item_id)
         self._refresh_detection_ui()
         self._update_status()
 
     def _ignore_item(self, item_id: str) -> None:
+        self._push_history("ignore")
         self.session.ignore(item_id)
         self._refresh_detection_ui()
         self._update_status()
 
     def _cancel_item(self, item_id: str) -> None:
+        self._push_history("cancel")
         self.session.cancel_mask(item_id)
         self._refresh_detection_ui()
         self._update_status()
 
     def _confirm_all(self) -> None:
+        self._push_history("confirm_all")
         n = self.session.confirm_all_pending()
         self._refresh_detection_ui()
         self._update_status()
@@ -367,6 +524,7 @@ class MainWindow(QMainWindow):
                 )
                 return
             ptype = item.pii_type
+        self._push_history("cancel_type")
         n = self.session.cancel_by_type(ptype)
         self._refresh_detection_ui()
         self._update_status()
@@ -381,19 +539,46 @@ class MainWindow(QMainWindow):
                 )
                 return
             ptype = item.pii_type
+        self._push_history("ignore_type")
         self.session.ignore_type(ptype)
         self._refresh_detection_ui()
         self._update_status()
 
     def _toggle_draw_mode(self, enabled: bool) -> None:
+        if enabled and self.act_ignore_region.isChecked():
+            self.act_ignore_region.blockSignals(True)
+            self.act_ignore_region.setChecked(False)
+            self.act_ignore_region.blockSignals(False)
+            self._ignore_region_mode = False
         self._draw_mode = enabled
-        self.preview.set_draw_mode(enabled)
-        self.statusBar().showMessage(
-            "마스킹 그리기 모드: 드래그로 영역을 지정하세요." if enabled else "",
-            0 if enabled else 2000,
-        )
+        self.preview.set_draw_mode(enabled or self._ignore_region_mode)
+        if enabled:
+            self.statusBar().showMessage("마스킹 그리기 모드: 드래그로 영역을 지정하세요.", 0)
+        elif not self._ignore_region_mode:
+            self.statusBar().showMessage("", 1)
+
+    def _toggle_ignore_region_mode(self, enabled: bool) -> None:
+        if enabled and self.act_draw.isChecked():
+            self.act_draw.blockSignals(True)
+            self.act_draw.setChecked(False)
+            self.act_draw.blockSignals(False)
+            self._draw_mode = False
+        self._ignore_region_mode = enabled
+        self.preview.set_draw_mode(enabled or self._draw_mode)
+        if enabled:
+            self.statusBar().showMessage(
+                "무시 영역 모드: 드래그한 구간은 이후 분석에서 제외됩니다.", 0
+            )
+        elif not self._draw_mode:
+            self.statusBar().showMessage("", 1)
 
     def _on_region_drawn(self, bbox: BBox) -> None:
+        if self._ignore_region_mode:
+            self._push_history("ignore_region")
+            self.session.add_ignore_region(self._page_index, bbox)
+            self.statusBar().showMessage("무시 영역을 추가했습니다.", 3000)
+            return
+        self._push_history("manual_mask")
         item = self.session.add_manual(self._page_index, bbox)
         self._selected_id = item.id
         self._refresh_detection_ui()
@@ -405,15 +590,23 @@ class MainWindow(QMainWindow):
         item = self.session.get(self._selected_id)
         if not item:
             return
+        self._push_history("delete")
         if item.status == DetectionStatus.CONFIRMED:
             self.session.cancel_mask(item.id)
-        elif item.source.value == "manual":
+        elif item.source == MaskSource.MANUAL:
             self.session.remove_item(item.id)
         else:
             self.session.ignore(item.id)
         self._selected_id = None
         self._refresh_detection_ui()
         self._update_status()
+
+    def _clear_page_masks(self) -> None:
+        self._push_history("clear_page")
+        n = self.session.clear_page_masks(self._page_index)
+        self._refresh_detection_ui()
+        self._update_status()
+        self.statusBar().showMessage(f"페이지 마스킹 {n}개 지움", 3000)
 
     # --- navigation / zoom ---
 

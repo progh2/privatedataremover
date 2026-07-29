@@ -92,3 +92,6 @@ class SessionIgnoreRules:
     ignored_types: set[PiiType] = field(default_factory=set)
     ignored_texts: set[str] = field(default_factory=set)  # normalized lowercase
     cancelled_ids: set[str] = field(default_factory=set)
+    # (page index or None=all pages, bbox in page coords)
+    ignored_regions: list[tuple[int | None, BBox]] = field(default_factory=list)
+
