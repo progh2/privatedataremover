@@ -146,7 +146,8 @@ python -m privatedataremover
 
 ## 개발·기여
 
-이슈 / 마일스톤 / [GitHub Projects](https://github.com/progh2/privatedataremover/projects)로 작업을 관리합니다.  
+이슈 / 마일스톤 / GitHub Projects로 작업을 관리합니다.  
+보드·마일스톤 링크: [`docs/GITHUB.md`](docs/GITHUB.md)  
 기여 방법: [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 ```bash
