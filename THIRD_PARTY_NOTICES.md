@@ -11,6 +11,7 @@
 | httpx | HTTP | BSD-3-Clause | LLM API |
 | openai (optional) | OpenAI SDK | Apache-2.0 | |
 | anthropic (optional) | Claude SDK | MIT | |
+| openpyxl | Excel | MIT | `.xlsx` / 숨김 시트·행·열 |
 | pytest | 테스트 | MIT | dev |
 
 앱 소스 코드는 [Apache License 2.0](LICENSE)입니다.

@@ -38,6 +38,10 @@ class PdfAdapter(DocumentAdapter):
             return 0
         return self._doc.page_count
 
+    @property
+    def unit_count(self) -> int:
+        return self.page_count
+
     def open(self, path: Path) -> None:
         import fitz
 

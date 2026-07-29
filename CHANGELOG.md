@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0 — 2026-07-29
+
+### 추가
+- Excel (`.xlsx`) adapter: 셀 PII, 숨긴 시트/행/열, export 치환+검정 채우기
+- HWPX adapter MVP: 섹션 텍스트 추출, XML 문자열 치환 export
+- `docs/adapters.md`, `docs/HWPX_SPIKE.md`
+- 문서 열기 통합 (PDF / Excel / HWPX)
+
 ## 0.1.0 — 2026-07-29
 
 첫 공개 MVP 릴리스.

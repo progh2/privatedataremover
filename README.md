@@ -5,13 +5,14 @@ PDF(및 향후 Office 문서)에서 개인정보를 탐지·검토·마스킹하
 
 | 항목 | 내용 |
 |------|------|
-| 버전 | **0.1.0** |
+| 버전 | **0.2.0** |
 | OS | Windows / macOS / Linux |
 | UI | PySide6 |
 | AI | Ollama(로컬) 또는 OpenAI / Anthropic(Claude) API |
 | 라이선스 | Apache-2.0 (앱) + [의존성/AGPL 고지](docs/LICENSING.md) |
 
 - 상세 요구사항: [`docs/PRD.md`](docs/PRD.md)
+- Adapter 계약: [`docs/adapters.md`](docs/adapters.md)
 - 사용 가이드: [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)
 - 빌드: [`docs/BUILD.md`](docs/BUILD.md)
 - 변경 이력: [`CHANGELOG.md`](CHANGELOG.md)
@@ -22,16 +23,15 @@ PDF(및 향후 Office 문서)에서 개인정보를 탐지·검토·마스킹하
 
 ## 주요 기능
 
-### PDF (MVP)
+### PDF / Excel / HWPX
 
 - PDF 열기, 페이지 미리보기, 탐지 영역 오버레이
-- **OCR** (Tesseract) — 스캔·이미지 PDF 지원
+- **Excel (.xlsx)**: 셀 PII, **숨긴 시트/행/열** 탐지·미리보기, 셀 치환/검정 채우기 export
+- **HWPX**: 섹션 텍스트 추출·문자열 치환 export (spike 기반 MVP)
+- **OCR** (Tesseract) — 스캔 PDF 지원
 - 규칙 + LLM 기반 개인정보 탐지
-- 검출 항목마다 **개인정보 유형** 표시 (이름, 주민번호, 전화, 이메일, 주소 등)
-- **수동 마스킹** (드래그 박스, 이동·리사이즈·삭제)
-- 수동 마스킹을 시드로 **반복 패턴 인식 → 미리보기 → 일괄 적용**
-- 항목 / 유형 / 페이지 / 패턴 단위 **마스킹 취소**, Undo/Redo
-- 무시 규칙 (특정 유형·영역 재제안 안 함)
+- 검출 항목마다 **개인정보 유형** 표시
+- **수동 마스킹**, 패턴 일괄 적용, Undo/Redo, 무시 영역
 
 ### 저장
 
@@ -176,7 +176,7 @@ pytest
 | M3 | Pattern & Undo ✅ (유사 페이지·일괄 적용·Undo/Redo·무시 영역) |
 | M4 | Export ✅ (안전 저장 / 이미지화 PDF / 잔존 검사) |
 | M5 | Release v0.1.0 ✅ |
-| M6+ | Excel / HWPX adapters |
+| M6 | Excel / HWPX ✅ (adapter·숨김 시트·spike MVP) |
 
 ---
 
