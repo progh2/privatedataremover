@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QSplitter,
     QStatusBar,
     QToolBar,
@@ -24,8 +26,13 @@ from PySide6.QtWidgets import (
 )
 
 from privatedataremover import __version__
+from privatedataremover.core.adapters.base import BBox, PiiType
 from privatedataremover.core.adapters.pdf import PdfAdapter
+from privatedataremover.core.pii import DetectionStatus
+from privatedataremover.core.pii.pipeline import analyze_document
+from privatedataremover.core.pii.session import DetectionSession
 from privatedataremover.core.settings import AppSettings, load_settings, save_settings
+from privatedataremover.ui.detection_panel import DetectionPanel
 from privatedataremover.ui.pdf_view import PdfPreview
 from privatedataremover.ui.settings_dialog import SettingsDialog
 
@@ -34,12 +41,15 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Private Data Remover")
-        self.resize(1100, 720)
+        self.resize(1200, 760)
         self.setAcceptDrops(True)
 
         self.settings: AppSettings = load_settings()
         self.adapter = PdfAdapter()
+        self.session = DetectionSession()
         self._page_index = 0
+        self._selected_id: str | None = None
+        self._draw_mode = False
 
         self.page_list = QListWidget()
         self.page_list.setMinimumWidth(140)
@@ -47,14 +57,18 @@ class MainWindow(QMainWindow):
 
         self.preview = PdfPreview()
         self.preview.zoom_changed.connect(self._on_zoom_changed)
+        self.preview.region_drawn.connect(self._on_region_drawn)
+        self.preview.overlay_clicked.connect(self._on_overlay_clicked)
 
-        self.side_panel = QLabel(
-            "탐지 목록\n\n(M2에서 개인정보 유형·필터가 표시됩니다.)"
-        )
-        self.side_panel.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.side_panel.setWordWrap(True)
-        self.side_panel.setMinimumWidth(200)
-        self.side_panel.setStyleSheet("padding: 8px;")
+        self.detection_panel = DetectionPanel()
+        self.detection_panel.set_refresh_callback(self._refresh_detection_ui)
+        self.detection_panel.selection_changed.connect(self._on_detection_selected)
+        self.detection_panel.confirm_requested.connect(self._confirm_item)
+        self.detection_panel.ignore_requested.connect(self._ignore_item)
+        self.detection_panel.cancel_requested.connect(self._cancel_item)
+        self.detection_panel.confirm_all_requested.connect(self._confirm_all)
+        self.detection_panel.cancel_type_requested.connect(self._cancel_type)
+        self.detection_panel.ignore_type_requested.connect(self._ignore_type)
 
         splitter = QSplitter()
         left = QWidget()
@@ -64,15 +78,11 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.page_list)
         splitter.addWidget(left)
         splitter.addWidget(self.preview)
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self.side_panel)
-        splitter.addWidget(right)
+        splitter.addWidget(self.detection_panel)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([160, 700, 220])
+        splitter.setSizes([160, 720, 280])
 
         container = QWidget()
         layout = QHBoxLayout(container)
@@ -108,6 +118,19 @@ class MainWindow(QMainWindow):
         self.act_settings = QAction("설정…", self)
         self.act_settings.triggered.connect(self.open_settings)
 
+        self.act_analyze = QAction("개인정보 분석", self)
+        self.act_analyze.setShortcut("Ctrl+R")
+        self.act_analyze.triggered.connect(self.run_analysis)
+
+        self.act_draw = QAction("마스킹 그리기", self)
+        self.act_draw.setCheckable(True)
+        self.act_draw.setShortcut("M")
+        self.act_draw.toggled.connect(self._toggle_draw_mode)
+
+        self.act_delete = QAction("선택 마스킹 삭제", self)
+        self.act_delete.setShortcut(QKeySequence.StandardKey.Delete)
+        self.act_delete.triggered.connect(self._delete_selected)
+
         self.act_zoom_in = QAction("확대", self)
         self.act_zoom_in.setShortcut(QKeySequence.StandardKey.ZoomIn)
         self.act_zoom_in.triggered.connect(lambda: self._bump_zoom(1.1))
@@ -127,6 +150,12 @@ class MainWindow(QMainWindow):
         self.act_about = QAction("정보", self)
         self.act_about.triggered.connect(self._about)
 
+        self.chk_use_llm = QCheckBox("LLM 사용")
+        self.chk_use_llm.setToolTip("규칙 탐지에 더해 설정한 LLM으로 추가 분석합니다.")
+        self.chk_use_ocr = QCheckBox("OCR")
+        self.chk_use_ocr.setChecked(True)
+        self.chk_use_ocr.setToolTip("텍스트가 적으면 Tesseract OCR을 사용합니다.")
+
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("파일")
         file_menu.addAction(self.act_open)
@@ -136,6 +165,10 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.act_exit)
 
+        edit_menu = self.menuBar().addMenu("편집")
+        edit_menu.addAction(self.act_draw)
+        edit_menu.addAction(self.act_delete)
+
         view_menu = self.menuBar().addMenu("보기")
         view_menu.addAction(self.act_zoom_in)
         view_menu.addAction(self.act_zoom_out)
@@ -144,6 +177,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.act_next)
 
         tools_menu = self.menuBar().addMenu("도구")
+        tools_menu.addAction(self.act_analyze)
         tools_menu.addAction(self.act_settings)
 
         help_menu = self.menuBar().addMenu("도움말")
@@ -154,6 +188,13 @@ class MainWindow(QMainWindow):
         bar.setMovable(False)
         self.addToolBar(bar)
         bar.addAction(self.act_open)
+        bar.addSeparator()
+        bar.addAction(self.act_analyze)
+        bar.addWidget(self.chk_use_ocr)
+        bar.addWidget(self.chk_use_llm)
+        bar.addSeparator()
+        bar.addAction(self.act_draw)
+        bar.addAction(self.act_delete)
         bar.addSeparator()
         bar.addAction(self.act_prev)
         bar.addAction(self.act_next)
@@ -185,6 +226,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "PDF 열기 실패", f"{path}\n\n{exc}")
             return
 
+        self.session.clear()
+        self._selected_id = None
         self.page_list.clear()
         for unit in self.adapter.iter_units():
             item = QListWidgetItem(unit.label)
@@ -192,11 +235,9 @@ class MainWindow(QMainWindow):
             self.page_list.addItem(item)
 
         self.setWindowTitle(f"Private Data Remover — {path.name}")
-        export_ready = False  # M4
-        self.act_safe_save.setEnabled(export_ready)
-        self.act_raster_save.setEnabled(export_ready)
         if self.page_list.count():
             self.page_list.setCurrentRow(0)
+        self._refresh_detection_ui()
         self._update_status()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
@@ -215,6 +256,165 @@ class MainWindow(QMainWindow):
                 event.acceptProposedAction()
                 return
 
+    # --- analysis ---
+
+    def run_analysis(self) -> None:
+        if self.adapter.page_count == 0:
+            QMessageBox.information(self, "분석", "먼저 PDF를 열어 주세요.")
+            return
+
+        progress = QProgressDialog("개인정보를 분석하는 중…", "취소", 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        try:
+            result = analyze_document(
+                self.adapter,
+                self.settings,
+                use_ocr=self.chk_use_ocr.isChecked(),
+                use_llm=self.chk_use_llm.isChecked(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            progress.close()
+            QMessageBox.critical(self, "분석 실패", str(exc))
+            return
+        progress.close()
+
+        added = self.session.add_items(result.items)
+        msg_parts = [f"새 후보 {added}건 (전체 탐지 {len(result.items)}건)"]
+        if result.used_ocr:
+            msg_parts.append(f"OCR 사용: {result.ocr_message or 'OK'}")
+        elif self.chk_use_ocr.isChecked() and result.ocr_message:
+            msg_parts.append(result.ocr_message)
+        if result.llm_error:
+            msg_parts.append(f"LLM 오류: {result.llm_error}")
+
+        self._refresh_detection_ui()
+        self._update_status()
+        QMessageBox.information(self, "분석 완료", "\n".join(msg_parts))
+
+    # --- detection actions ---
+
+    def _refresh_detection_ui(self) -> None:
+        ptype = self.detection_panel.filter_pii_type()
+        status_filter = self.detection_panel.filter_status_value()
+        hide_terminal = status_filter == "active"
+        status = status_filter if isinstance(status_filter, DetectionStatus) else None
+
+        items = self.session.filtered(
+            pii_type=ptype,
+            status=status,
+            hide_terminal=hide_terminal,
+        )
+        # When "active", show pending+confirmed
+        if hide_terminal:
+            items = [
+                i
+                for i in self.session.filtered(pii_type=ptype)
+                if i.status in (DetectionStatus.PENDING, DetectionStatus.CONFIRMED)
+            ]
+
+        self.detection_panel.populate(items, self._selected_id)
+        page_items = [
+            i
+            for i in self.session.items
+            if i.unit_index == self._page_index
+            and i.status not in (DetectionStatus.IGNORED,)
+        ]
+        self.preview.set_overlays(page_items, self._selected_id)
+
+    def _on_detection_selected(self, item_id: str) -> None:
+        self._selected_id = item_id
+        item = self.session.get(item_id)
+        if item and item.unit_index != self._page_index:
+            self.page_list.setCurrentRow(item.unit_index)
+        else:
+            self._refresh_detection_ui()
+
+    def _on_overlay_clicked(self, item_id: str) -> None:
+        self._selected_id = item_id
+        self._refresh_detection_ui()
+
+    def _confirm_item(self, item_id: str) -> None:
+        self.session.confirm(item_id)
+        self._refresh_detection_ui()
+        self._update_status()
+
+    def _ignore_item(self, item_id: str) -> None:
+        self.session.ignore(item_id)
+        self._refresh_detection_ui()
+        self._update_status()
+
+    def _cancel_item(self, item_id: str) -> None:
+        self.session.cancel_mask(item_id)
+        self._refresh_detection_ui()
+        self._update_status()
+
+    def _confirm_all(self) -> None:
+        n = self.session.confirm_all_pending()
+        self._refresh_detection_ui()
+        self._update_status()
+        self.statusBar().showMessage(f"{n}건 마스킹 확정", 3000)
+
+    def _cancel_type(self, ptype: PiiType | None) -> None:
+        if ptype is None:
+            item = self.session.get(self._selected_id) if self._selected_id else None
+            if not item:
+                QMessageBox.information(
+                    self, "유형 취소", "유형 필터를 고르거나 항목을 선택하세요."
+                )
+                return
+            ptype = item.pii_type
+        n = self.session.cancel_by_type(ptype)
+        self._refresh_detection_ui()
+        self._update_status()
+        self.statusBar().showMessage(f"{ptype.value} {n}건 마스킹 취소", 3000)
+
+    def _ignore_type(self, ptype: PiiType | None) -> None:
+        if ptype is None:
+            item = self.session.get(self._selected_id) if self._selected_id else None
+            if not item:
+                QMessageBox.information(
+                    self, "유형 무시", "유형 필터를 고르거나 항목을 선택하세요."
+                )
+                return
+            ptype = item.pii_type
+        self.session.ignore_type(ptype)
+        self._refresh_detection_ui()
+        self._update_status()
+
+    def _toggle_draw_mode(self, enabled: bool) -> None:
+        self._draw_mode = enabled
+        self.preview.set_draw_mode(enabled)
+        self.statusBar().showMessage(
+            "마스킹 그리기 모드: 드래그로 영역을 지정하세요." if enabled else "",
+            0 if enabled else 2000,
+        )
+
+    def _on_region_drawn(self, bbox: BBox) -> None:
+        item = self.session.add_manual(self._page_index, bbox)
+        self._selected_id = item.id
+        self._refresh_detection_ui()
+        self._update_status()
+
+    def _delete_selected(self) -> None:
+        if not self._selected_id:
+            return
+        item = self.session.get(self._selected_id)
+        if not item:
+            return
+        if item.status == DetectionStatus.CONFIRMED:
+            self.session.cancel_mask(item.id)
+        elif item.source.value == "manual":
+            self.session.remove_item(item.id)
+        else:
+            self.session.ignore(item.id)
+        self._selected_id = None
+        self._refresh_detection_ui()
+        self._update_status()
+
     # --- navigation / zoom ---
 
     def _on_page_selected(self, row: int) -> None:
@@ -222,6 +422,7 @@ class MainWindow(QMainWindow):
             return
         self._page_index = row
         self._render_current_page()
+        self._refresh_detection_ui()
 
     def _goto_page(self, index: int) -> None:
         if self.adapter.page_count == 0:
@@ -233,7 +434,6 @@ class MainWindow(QMainWindow):
         self.preview.set_scale(self.preview.scale * factor)
 
     def _on_zoom_changed(self, _scale: float) -> None:
-        # Ctrl+wheel already updated scale; re-render from PDF for sharpness.
         self._render_current_page()
 
     def _render_current_page(self) -> None:
@@ -242,7 +442,6 @@ class MainWindow(QMainWindow):
             return
         try:
             png = self.adapter.render_unit_preview(self._page_index, scale=self.preview.scale)
-            # Avoid feedback loop: show without emitting zoom
             self.preview.blockSignals(True)
             self.preview.show_png(png)
             self.preview.blockSignals(False)
@@ -274,16 +473,22 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "준비 중",
-            "저장 기능은 마일스톤 M4에서 구현됩니다.",
+            "저장 기능은 마일스톤 M4에서 구현됩니다.\n"
+            f"현재 확정 마스크: {len(self.session.masks())}개",
         )
 
     def _update_status(self) -> None:
         provider = self.settings.llm_provider.value
         local = "로컬 전용" if self.settings.local_only else "외부 API 허용"
+        pending = sum(1 for i in self.session.items if i.status == DetectionStatus.PENDING)
+        masked = len(self.session.masks())
         if self.adapter.page_count:
             page = f"{self._page_index + 1}/{self.adapter.page_count}"
             zoom = f"{self.preview.scale * 100:.0f}%"
-            text = f"페이지 {page} · 확대 {zoom} · LLM: {provider} · {local}"
+            text = (
+                f"페이지 {page} · 확대 {zoom} · 대기 {pending} · 마스킹 {masked} · "
+                f"LLM: {provider} · {local}"
+            )
         else:
             text = f"문서 없음 · LLM: {provider} · {local}"
         self.statusBar().showMessage(text)

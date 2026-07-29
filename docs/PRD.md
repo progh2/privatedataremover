@@ -295,7 +295,8 @@ flowchart TD
 
 - PySide6, Win/Mac/Linux
 - **M1 완료:** PDF 열기·페이지 미리보기·줌, LLM 설정(Ollama/OpenAI/Claude)·연결 테스트·로컬 전용 모드
-- OCR, 유형 표시, 수동 마스킹, 패턴 학습, 취소/Undo (M2–M3)
+- **M2 완료:** OCR(Tesseract), 규칙+LLM 탐지, 유형 표시·필터, 수동 마스킹, 항목/유형 확정·무시·취소
+- 패턴 학습, Undo/Redo (M3)
 - 안전 저장 + 페이지 이미지화 PDF (M4)
 - DocumentAdapter 스텁 (PDF 구현 진행 중; xlsx/hwpx 스텁)
 - README / PRD / 오픈소스 고지
