@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from privatedataremover import __version__
 from privatedataremover.core.adapters.base import BBox, MaskSource, PiiType
 from privatedataremover.core.adapters.pdf import PdfAdapter
+from privatedataremover.core.export_utils import find_residual_texts
 from privatedataremover.core.history import HistoryStack, restore_session, snapshot_from_session
 from privatedataremover.core.pattern import find_similar_pages, page_fingerprint
 from privatedataremover.core.pattern.apply import PatternProposal, SeedMask, build_pattern_items
@@ -36,6 +37,7 @@ from privatedataremover.core.pii.pipeline import analyze_document
 from privatedataremover.core.pii.session import DetectionSession
 from privatedataremover.core.settings import AppSettings, load_settings, save_settings
 from privatedataremover.ui.detection_panel import DetectionPanel
+from privatedataremover.ui.export_dialog import RasterExportDialog
 from privatedataremover.ui.pattern_dialog import PatternApplyDialog
 from privatedataremover.ui.pdf_view import PdfPreview
 from privatedataremover.ui.settings_dialog import SettingsDialog
@@ -110,13 +112,14 @@ class MainWindow(QMainWindow):
 
         self.act_safe_save = QAction("안전 저장…", self)
         self.act_safe_save.setEnabled(False)
-        self.act_safe_save.setToolTip("M4에서 구현 예정")
-        self.act_safe_save.triggered.connect(self._not_ready_export)
+        self.act_safe_save.setShortcut(QKeySequence.StandardKey.Save)
+        self.act_safe_save.setToolTip("텍스트 삭제 + 검정 박스로 사본 저장")
+        self.act_safe_save.triggered.connect(self.save_safe)
 
         self.act_raster_save = QAction("페이지 이미지화 후 PDF로 저장…", self)
         self.act_raster_save.setEnabled(False)
-        self.act_raster_save.setToolTip("M4에서 구현 예정")
-        self.act_raster_save.triggered.connect(self._not_ready_export)
+        self.act_raster_save.setToolTip("페이지 전체를 이미지로 구운 PDF 저장")
+        self.act_raster_save.triggered.connect(self.save_rasterized)
 
         self.act_exit = QAction("종료", self)
         self.act_exit.setShortcut(QKeySequence.StandardKey.Quit)
@@ -279,6 +282,8 @@ class MainWindow(QMainWindow):
             self.page_list.addItem(item)
 
         self.setWindowTitle(f"Private Data Remover — {path.name}")
+        self.act_safe_save.setEnabled(True)
+        self.act_raster_save.setEnabled(True)
         if self.page_list.count():
             self.page_list.setCurrentRow(0)
         self._refresh_detection_ui()
@@ -662,13 +667,124 @@ class MainWindow(QMainWindow):
             "Apache-2.0 · docs/PRD.md 참고",
         )
 
-    def _not_ready_export(self) -> None:
-        QMessageBox.information(
-            self,
-            "준비 중",
-            "저장 기능은 마일스톤 M4에서 구현됩니다.\n"
-            f"현재 확정 마스크: {len(self.session.masks())}개",
+    def _confirm_before_export(self) -> bool:
+        pending = sum(
+            1 for i in self.session.items if i.status == DetectionStatus.PENDING
         )
+        masks = self.session.masks()
+        if not masks:
+            reply = QMessageBox.question(
+                self,
+                "저장",
+                "확정된 마스킹이 없습니다. 그대로 사본을 저장할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            return reply == QMessageBox.StandardButton.Yes
+        if pending:
+            reply = QMessageBox.warning(
+                self,
+                "미확정 항목",
+                f"아직 확정하지 않은 탐지 항목이 {pending}건 있습니다.\n"
+                "확정된 마스킹만 반영하여 저장할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            return reply == QMessageBox.StandardButton.Yes
+        return True
+
+    def _default_save_name(self, suffix: str) -> str:
+        if self.adapter.path:
+            stem = self.adapter.path.stem
+            return f"{stem}{suffix}.pdf"
+        return f"redacted{suffix}.pdf"
+
+    def _verify_export(self, dest: Path) -> None:
+        forbidden = [
+            m.label
+            for m in self.session.masks()
+            if m.label and m.label not in ("(수동 마스킹)", "(패턴 마스킹)")
+        ]
+        # Also include confirmed item texts
+        for item in self.session.items:
+            if item.status == DetectionStatus.CONFIRMED and item.text.strip():
+                if item.text not in ("(수동 마스킹)", "(패턴 마스킹)"):
+                    forbidden.append(item.text.strip())
+        hits = find_residual_texts(dest, forbidden)
+        if hits:
+            sample = ", ".join(repr(h.text[:30]) for h in hits[:5])
+            QMessageBox.warning(
+                self,
+                "잔존 텍스트 경고",
+                f"저장본에서 확정 문자열 {len(hits)}건이 여전히 추출됩니다.\n"
+                f"예: {sample}\n\n"
+                "「페이지 이미지화 후 PDF로 저장」을 권장합니다.",
+            )
+        else:
+            self.statusBar().showMessage("잔존 텍스트 검사 통과", 4000)
+
+    def save_safe(self) -> None:
+        if self.adapter.page_count == 0:
+            return
+        if not self._confirm_before_export():
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "안전 저장",
+            self._default_save_name("_safe"),
+            "PDF Files (*.pdf)",
+        )
+        if not path:
+            return
+        dest = Path(path)
+        progress = QProgressDialog("안전 저장 중…", None, 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+        try:
+            self.adapter.export_safe(dest, self.session.masks())
+            self._verify_export(dest)
+            self.adapter.assert_original_untouched()
+        except Exception as exc:  # noqa: BLE001
+            progress.close()
+            QMessageBox.critical(self, "저장 실패", str(exc))
+            return
+        progress.close()
+        QMessageBox.information(self, "저장 완료", f"저장했습니다:\n{dest}")
+
+    def save_rasterized(self) -> None:
+        if self.adapter.page_count == 0:
+            return
+        if not self._confirm_before_export():
+            return
+        opts = RasterExportDialog(self)
+        if not opts.exec():
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "페이지 이미지화 후 PDF로 저장",
+            self._default_save_name("_raster"),
+            "PDF Files (*.pdf)",
+        )
+        if not path:
+            return
+        dest = Path(path)
+        progress = QProgressDialog("이미지화 저장 중…", None, 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+        try:
+            self.adapter.export_rasterized(
+                dest, self.session.masks(), dpi=opts.dpi()
+            )
+            self._verify_export(dest)
+            self.adapter.assert_original_untouched()
+        except Exception as exc:  # noqa: BLE001
+            progress.close()
+            QMessageBox.critical(self, "저장 실패", str(exc))
+            return
+        progress.close()
+        QMessageBox.information(self, "저장 완료", f"저장했습니다:\n{dest}")
 
     def _update_status(self) -> None:
         provider = self.settings.llm_provider.value
