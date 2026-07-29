@@ -120,6 +120,8 @@ ollama pull llama3.2
 python -m privatedataremover
 ```
 
+앱이 실행되면 **파일 → 열기** 또는 PDF 드래그앤드롭으로 문서를 열고, **도구 → 설정**에서 LLM(Ollama/OpenAI/Claude)·로컬 전용 모드·Tesseract 경로를 구성할 수 있습니다.
+
 패키징(설치형 바이너리)은 릴리스 마일스톤에서 제공합니다.
 
 ---
@@ -160,8 +162,8 @@ pytest
 
 | 마일스톤 | 내용 |
 |----------|------|
-| M0 | Repo & Docs |
-| M1 | Shell UI & PDF View |
+| M0 | Repo & Docs ✅ |
+| M1 | Shell UI & PDF View ✅ (열기·미리보기·LLM 설정·로컬 전용) |
 | M2 | Detect & Manual Mask |
 | M3 | Pattern & Undo |
 | M4 | Export (안전 저장 / 이미지화 PDF) |
