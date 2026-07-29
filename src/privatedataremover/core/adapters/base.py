@@ -95,6 +95,18 @@ class DocumentAdapter(ABC):
 
     format_id: str = "unknown"
 
+    @property
+    def path(self) -> Path | None:
+        return getattr(self, "_path", None)
+
+    @property
+    def unit_count(self) -> int:
+        return sum(1 for _ in self.iter_units())
+
+    def assert_original_untouched(self) -> None:
+        """Optional integrity check; overrides may raise if original changed."""
+        return
+
     @abstractmethod
     def open(self, path: Path) -> None:
         """Load document from path. Must not modify the original file."""

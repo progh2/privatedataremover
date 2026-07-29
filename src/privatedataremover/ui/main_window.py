@@ -26,8 +26,8 @@ from PySide6.QtWidgets import (
 )
 
 from privatedataremover import __version__
-from privatedataremover.core.adapters.base import BBox, MaskSource, PiiType
-from privatedataremover.core.adapters.pdf import PdfAdapter
+from privatedataremover.core.adapters.base import BBox, DocumentAdapter, MaskSource, PiiType
+from privatedataremover.core.adapters.factory import open_document, supported_extensions
 from privatedataremover.core.export_utils import find_residual_texts
 from privatedataremover.core.history import HistoryStack, restore_session, snapshot_from_session
 from privatedataremover.core.pattern import find_similar_pages, page_fingerprint
@@ -51,7 +51,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self.settings: AppSettings = load_settings()
-        self.adapter = PdfAdapter()
+        self.adapter: DocumentAdapter | None = None
         self.session = DetectionSession()
         self.history = HistoryStack()
         self._page_index = 0
@@ -252,23 +252,26 @@ class MainWindow(QMainWindow):
     # --- file / drag-drop ---
 
     def open_file_dialog(self) -> None:
+        exts = " ".join(f"*{e}" for e in supported_extensions())
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "PDF 열기",
+            "문서 열기",
             "",
-            "PDF Files (*.pdf);;All Files (*)",
+            f"Supported ({exts});;PDF (*.pdf);;Excel (*.xlsx *.xlsm);;HWPX (*.hwpx);;All Files (*)",
         )
         if path:
-            self.open_pdf(Path(path))
+            self.open_document_path(Path(path))
 
-    def open_pdf(self, path: Path) -> None:
+    def open_document_path(self, path: Path) -> None:
         try:
-            self.adapter.open(path)
+            if self.adapter is not None:
+                self.adapter.close()
+            self.adapter = open_document(path)
         except PermissionError as exc:
-            QMessageBox.critical(self, "PDF 열기 실패", str(exc))
+            QMessageBox.critical(self, "열기 실패", str(exc))
             return
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "PDF 열기 실패", f"{path}\n\n{exc}")
+            QMessageBox.critical(self, "열기 실패", f"{path}\n\n{exc}")
             return
 
         self.session.clear()
@@ -276,6 +279,7 @@ class MainWindow(QMainWindow):
         self._last_pattern_id = None
         self._selected_id = None
         self.page_list.clear()
+        assert self.adapter is not None
         for unit in self.adapter.iter_units():
             item = QListWidgetItem(unit.label)
             item.setData(Qt.ItemDataRole.UserRole, unit.index)
@@ -284,6 +288,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"Private Data Remover — {path.name}")
         self.act_safe_save.setEnabled(True)
         self.act_raster_save.setEnabled(True)
+        left_label = "페이지" if self.adapter.format_id == "pdf" else "시트/섹션"
+        # Update left column caption if present
+        for child in self.findChildren(QLabel):
+            if child.text() in ("페이지", "시트/섹션"):
+                child.setText(left_label)
+                break
         if self.page_list.count():
             self.page_list.setCurrentRow(0)
         self._refresh_detection_ui()
@@ -292,7 +302,8 @@ class MainWindow(QMainWindow):
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith(".pdf"):
+                suffix = Path(url.toLocalFile()).suffix.lower()
+                if suffix in supported_extensions():
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -300,16 +311,21 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
         for url in event.mimeData().urls():
             local = url.toLocalFile()
-            if local.lower().endswith(".pdf"):
-                self.open_pdf(Path(local))
+            if Path(local).suffix.lower() in supported_extensions():
+                self.open_document_path(Path(local))
                 event.acceptProposedAction()
                 return
 
     # --- analysis ---
 
+    def _unit_count(self) -> int:
+        if self.adapter is None:
+            return 0
+        return self.adapter.unit_count
+
     def run_analysis(self) -> None:
-        if self.adapter.page_count == 0:
-            QMessageBox.information(self, "분석", "먼저 PDF를 열어 주세요.")
+        if self.adapter is None or self._unit_count() == 0:
+            QMessageBox.information(self, "분석", "먼저 문서를 열어 주세요.")
             return
 
         progress = QProgressDialog("개인정보를 분석하는 중…", "취소", 0, 0, self)
@@ -334,6 +350,8 @@ class MainWindow(QMainWindow):
         self._push_history("analyze")
         added = self.session.add_items(result.items)
         msg_parts = [f"새 후보 {added}건 (전체 탐지 {len(result.items)}건)"]
+        if result.notes:
+            msg_parts.append(result.notes)
         if result.used_ocr:
             msg_parts.append(f"OCR 사용: {result.ocr_message or 'OK'}")
         elif self.chk_use_ocr.isChecked() and result.ocr_message:
@@ -413,15 +431,15 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     def apply_pattern_to_similar(self) -> None:
-        if self.adapter.page_count == 0:
-            QMessageBox.information(self, "패턴", "먼저 PDF를 열어 주세요.")
+        if self.adapter is None or self._unit_count() == 0:
+            QMessageBox.information(self, "패턴", "먼저 문서를 열어 주세요.")
             return
         seeds = self.session.confirmed_on_page(self._page_index)
         if not seeds:
             QMessageBox.information(
                 self,
                 "패턴",
-                "현재 페이지에 확정/수동 마스킹이 없습니다.\n"
+                "현재 단위에 확정/수동 마스킹이 없습니다.\n"
                 "먼저 마스크를 그린 뒤 다시 시도하세요.",
             )
             return
@@ -623,9 +641,9 @@ class MainWindow(QMainWindow):
         self._refresh_detection_ui()
 
     def _goto_page(self, index: int) -> None:
-        if self.adapter.page_count == 0:
+        if self._unit_count() == 0:
             return
-        index = max(0, min(index, self.adapter.page_count - 1))
+        index = max(0, min(index, self._unit_count() - 1))
         self.page_list.setCurrentRow(index)
 
     def _bump_zoom(self, factor: float) -> None:
@@ -635,7 +653,7 @@ class MainWindow(QMainWindow):
         self._render_current_page()
 
     def _render_current_page(self) -> None:
-        if self.adapter.page_count == 0:
+        if self.adapter is None or self._unit_count() == 0:
             self.preview.clear_preview()
             return
         try:
@@ -692,9 +710,12 @@ class MainWindow(QMainWindow):
         return True
 
     def _default_save_name(self, suffix: str) -> str:
-        if self.adapter.path:
+        if self.adapter and self.adapter.path:
             stem = self.adapter.path.stem
-            return f"{stem}{suffix}.pdf"
+            ext = self.adapter.path.suffix or ".pdf"
+            if self.adapter.format_id == "pdf" or suffix.startswith("_raster"):
+                return f"{stem}{suffix}.pdf"
+            return f"{stem}{suffix}{ext}"
         return f"redacted{suffix}.pdf"
 
     def _verify_export(self, dest: Path) -> None:
@@ -703,7 +724,6 @@ class MainWindow(QMainWindow):
             for m in self.session.masks()
             if m.label and m.label not in ("(수동 마스킹)", "(패턴 마스킹)")
         ]
-        # Also include confirmed item texts
         for item in self.session.items:
             if item.status == DetectionStatus.CONFIRMED and item.text.strip():
                 if item.text not in ("(수동 마스킹)", "(패턴 마스킹)"):
@@ -722,15 +742,21 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("잔존 텍스트 검사 통과", 4000)
 
     def save_safe(self) -> None:
-        if self.adapter.page_count == 0:
+        if self.adapter is None or self._unit_count() == 0:
             return
         if not self._confirm_before_export():
             return
+        fmt = self.adapter.format_id
+        filters = {
+            "pdf": "PDF Files (*.pdf)",
+            "xlsx": "Excel Files (*.xlsx)",
+            "hwpx": "HWPX Files (*.hwpx)",
+        }.get(fmt, "All Files (*)")
         path, _ = QFileDialog.getSaveFileName(
             self,
             "안전 저장",
             self._default_save_name("_safe"),
-            "PDF Files (*.pdf)",
+            filters,
         )
         if not path:
             return
@@ -742,7 +768,8 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         try:
             self.adapter.export_safe(dest, self.session.masks())
-            self._verify_export(dest)
+            if fmt == "pdf":
+                self._verify_export(dest)
             self.adapter.assert_original_untouched()
         except Exception as exc:  # noqa: BLE001
             progress.close()
@@ -752,7 +779,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "저장 완료", f"저장했습니다:\n{dest}")
 
     def save_rasterized(self) -> None:
-        if self.adapter.page_count == 0:
+        if self.adapter is None or self._unit_count() == 0:
             return
         if not self._confirm_before_export():
             return
@@ -791,11 +818,12 @@ class MainWindow(QMainWindow):
         local = "로컬 전용" if self.settings.local_only else "외부 API 허용"
         pending = sum(1 for i in self.session.items if i.status == DetectionStatus.PENDING)
         masked = len(self.session.masks())
-        if self.adapter.page_count:
-            page = f"{self._page_index + 1}/{self.adapter.page_count}"
+        fmt = self.adapter.format_id if self.adapter else "-"
+        if self._unit_count():
+            page = f"{self._page_index + 1}/{self._unit_count()}"
             zoom = f"{self.preview.scale * 100:.0f}%"
             text = (
-                f"페이지 {page} · 확대 {zoom} · 대기 {pending} · 마스킹 {masked} · "
+                f"{fmt} · 단위 {page} · 확대 {zoom} · 대기 {pending} · 마스킹 {masked} · "
                 f"LLM: {provider} · {local}"
             )
         else:
@@ -803,7 +831,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(text)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self.adapter.close()
+        if self.adapter is not None:
+            self.adapter.close()
         super().closeEvent(event)
 
 

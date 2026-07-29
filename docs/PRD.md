@@ -299,7 +299,7 @@ flowchart TD
 - **M3 완료:** 페이지 유사도·패턴 시드 일괄 적용(미리보기), 패턴 롤백, Undo/Redo, 무시 영역
 - **M4 완료:** 안전 저장(텍스트 삭제+검정 박스), 페이지 이미지화 PDF, 잔존 텍스트 검증, 원본 무결성
 - **M5 / v0.1.0:** 샘플 fixture, PyInstaller 스펙·빌드 문서, CI, 사용 가이드, PyMuPDF AGPL 수용 문서화
-- Excel / HWPX adapter (M6+)
+- **M6 / v0.2.0:** Excel·HWPX DocumentAdapter, 숨김 시트/행열, adapters.md · HWPX spike
 
 ### M6+
 

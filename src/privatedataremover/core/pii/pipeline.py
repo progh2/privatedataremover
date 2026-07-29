@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from privatedataremover.core.adapters.pdf import PdfAdapter
+from privatedataremover.core.adapters.base import DocumentAdapter
 from privatedataremover.core.llm.analyze import analyze_page_with_llm
 from privatedataremover.core.pii import DetectionItem
 from privatedataremover.core.pii.ocr import check_tesseract, ocr_png_to_spans
@@ -18,10 +18,11 @@ class AnalyzeResult:
     used_ocr: bool
     ocr_message: str
     llm_error: str = ""
+    notes: str = ""
 
 
 def analyze_document(
-    adapter: PdfAdapter,
+    adapter: DocumentAdapter,
     settings: AppSettings,
     *,
     use_ocr: bool = True,
@@ -29,14 +30,31 @@ def analyze_document(
     ocr_if_sparse: bool = True,
     sparse_char_threshold: int = 40,
 ) -> AnalyzeResult:
-    """Analyze all pages; returns merged detection items (pending)."""
+    """Analyze all units; returns merged detection items (pending)."""
     all_items: list[DetectionItem] = []
     used_ocr = False
     ocr_message = ""
     llm_error = ""
+    notes_parts: list[str] = []
+
+    # Hidden sheet / structure notes for Excel
+    if adapter.format_id == "xlsx" and hasattr(adapter, "list_hidden_sheet_summary"):
+        summary = adapter.list_hidden_sheet_summary()  # type: ignore[attr-defined]
+        if summary:
+            notes_parts.append(
+                "숨김/구조: "
+                + ", ".join(
+                    f"{s.get('name')}(hidden={s.get('hidden')}, rows={s.get('hidden_rows')}, cols={s.get('hidden_cols')})"
+                    for s in summary
+                )
+            )
 
     ocr_ok = check_tesseract(settings.tesseract_cmd)
-    if use_ocr and not ocr_ok.available:
+    # OCR mainly helps scanned PDFs; skip by default for tabular formats unless sparse.
+    allow_ocr = use_ocr and adapter.format_id == "pdf"
+    if use_ocr and not allow_ocr:
+        ocr_message = "OCR은 PDF에 적용됩니다 (현재 형식에서는 건너뜀)."
+    elif use_ocr and not ocr_ok.available:
         ocr_message = ocr_ok.message
 
     for unit in adapter.iter_units():
@@ -44,7 +62,7 @@ def analyze_document(
         native_text = " ".join(s.text for s in spans)
         page_used_ocr = False
 
-        need_ocr = use_ocr and ocr_ok.available and (
+        need_ocr = allow_ocr and ocr_ok.available and (
             not ocr_if_sparse or len(native_text.strip()) < sparse_char_threshold
         )
         if need_ocr:
@@ -62,7 +80,7 @@ def analyze_document(
                     page_used_ocr = True
                     used_ocr = True
             except Exception as exc:  # noqa: BLE001
-                ocr_message = f"OCR 오류(페이지 {unit.index + 1}): {exc}"
+                ocr_message = f"OCR 오류(단위 {unit.index + 1}): {exc}"
 
         all_items.extend(detect_in_spans(spans))
 
@@ -80,7 +98,7 @@ def analyze_document(
             except Exception as exc:  # noqa: BLE001
                 llm_error = str(exc)
 
-        _ = page_used_ocr  # reserved for per-page reporting
+        _ = page_used_ocr
 
     if used_ocr and not ocr_message:
         ocr_message = ocr_ok.message
@@ -90,4 +108,5 @@ def analyze_document(
         used_ocr=used_ocr,
         ocr_message=ocr_message,
         llm_error=llm_error,
+        notes="\n".join(notes_parts),
     )
