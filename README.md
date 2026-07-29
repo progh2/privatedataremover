@@ -5,12 +5,16 @@ PDF(및 향후 Office 문서)에서 개인정보를 탐지·검토·마스킹하
 
 | 항목 | 내용 |
 |------|------|
+| 버전 | **0.1.0** |
 | OS | Windows / macOS / Linux |
 | UI | PySide6 |
 | AI | Ollama(로컬) 또는 OpenAI / Anthropic(Claude) API |
-| 라이선스 | Apache-2.0 (앱 코드). 의존성 고지는 `THIRD_PARTY_NOTICES.md` 참고 |
+| 라이선스 | Apache-2.0 (앱) + [의존성/AGPL 고지](docs/LICENSING.md) |
 
-상세 요구사항: [`docs/PRD.md`](docs/PRD.md)
+- 상세 요구사항: [`docs/PRD.md`](docs/PRD.md)
+- 사용 가이드: [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)
+- 빌드: [`docs/BUILD.md`](docs/BUILD.md)
+- 변경 이력: [`CHANGELOG.md`](CHANGELOG.md)
 
 > README는 PRD·기능·설치 방법이 바뀔 때마다 함께 갱신합니다.
 
@@ -171,7 +175,7 @@ pytest
 | M2 | Detect & Manual Mask ✅ (OCR·규칙/LLM 탐지·유형·수동 마스킹·취소) |
 | M3 | Pattern & Undo ✅ (유사 페이지·일괄 적용·Undo/Redo·무시 영역) |
 | M4 | Export ✅ (안전 저장 / 이미지화 PDF / 잔존 검사) |
-| M5 | Tests, packaging, v0.1.0 |
+| M5 | Release v0.1.0 ✅ |
 | M6+ | Excel / HWPX adapters |
 
 ---
@@ -185,5 +189,5 @@ pytest
 
 ## 라이선스
 
-Apache License 2.0 — 자세한 내용은 [`LICENSE`](LICENSE)를 참고하세요.  
-서드파티 고지: [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
+Apache License 2.0 — [`LICENSE`](LICENSE)  
+서드파티·PyMuPDF AGPL 정책: [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), [`docs/LICENSING.md`](docs/LICENSING.md)
