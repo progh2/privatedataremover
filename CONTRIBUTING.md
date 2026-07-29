@@ -17,9 +17,11 @@ python -m venv .venv
 # macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
+python scripts/make_sample_pdf.py   # optional sample PDFs
 ```
 
-Tesseract·Ollama는 README 설치 절을 참고하세요.
+Tesseract·Ollama는 README 설치 절을 참고하세요.  
+사용 흐름: [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) · 빌드: [`docs/BUILD.md`](docs/BUILD.md)
 
 ## 브랜치·PR
 

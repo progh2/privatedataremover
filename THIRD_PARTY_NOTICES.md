@@ -13,5 +13,8 @@
 | anthropic (optional) | Claude SDK | MIT | |
 | pytest | 테스트 | MIT | dev |
 
-앱 소스 코드는 [Apache License 2.0](LICENSE)입니다.  
-PyMuPDF를 AGPL로 링크·배포하는 경우, 배포물 전체에 AGPL 의무가 적용될 수 있습니다. 상용 배포나 라이선스 충돌이 우려되면 대체 PDF 엔진 이슈를 참고하세요.
+앱 소스 코드는 [Apache License 2.0](LICENSE)입니다.
+
+**배포 정책 (2026-07-29, #4):** 오픈소스 바이너리/소스 배포에서 **PyMuPDF AGPL-3.0을 수용**합니다.  
+자세한 내용은 [`docs/LICENSING.md`](docs/LICENSING.md)를 참고하세요.  
+상용 폐쇄 배포가 필요하면 Artifex 상용 라이선스 또는 대체 PDF 엔진을 검토하세요.

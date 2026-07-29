@@ -32,6 +32,10 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
+# PyInstaller
+dist/
+# keep packaging/*.spec tracked
+
 # App local
 *.local.json
 .credentials/
@@ -40,4 +44,4 @@ temp/
 *.log
 
 # Release artifacts
-*.spec
+# *.spec is in packaging/ — do not ignore that path

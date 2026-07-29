@@ -298,8 +298,8 @@ flowchart TD
 - **M2 완료:** OCR(Tesseract), 규칙+LLM 탐지, 유형 표시·필터, 수동 마스킹, 항목/유형 확정·무시·취소
 - **M3 완료:** 페이지 유사도·패턴 시드 일괄 적용(미리보기), 패턴 롤백, Undo/Redo, 무시 영역
 - **M4 완료:** 안전 저장(텍스트 삭제+검정 박스), 페이지 이미지화 PDF, 잔존 텍스트 검증, 원본 무결성
-- DocumentAdapter 스텁 (PDF 구현; xlsx/hwpx 스텁) · README / PRD / 오픈소스 고지
-- 패키징·v0.1.0 (M5)
+- **M5 / v0.1.0:** 샘플 fixture, PyInstaller 스펙·빌드 문서, CI, 사용 가이드, PyMuPDF AGPL 수용 문서화
+- Excel / HWPX adapter (M6+)
 
 ### M6+
 
