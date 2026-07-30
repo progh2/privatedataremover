@@ -31,7 +31,7 @@ def _color_for(item: DetectionItem) -> QColor:
 class OverlayLabel(QLabel):
     """Pixmap label that paints detection overlays and supports drag-rect."""
 
-    region_drawn = Signal(BBox)  # page coordinates
+    region_drawn = Signal(object)  # BBox in page coordinates (object avoids Qt metatype crash)
     overlay_clicked = Signal(str)  # item id
 
     def __init__(self, parent=None) -> None:
@@ -162,7 +162,7 @@ class PdfPreview(QScrollArea):
     """Scrollable page image with zoom, overlay, and draw mode."""
 
     zoom_changed = Signal(float)
-    region_drawn = Signal(BBox)
+    region_drawn = Signal(object)  # BBox (object avoids Qt metatype crash)
     overlay_clicked = Signal(str)
 
     def __init__(self, parent=None) -> None:

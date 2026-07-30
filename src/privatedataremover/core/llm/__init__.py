@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from privatedataremover.core.settings import AppSettings, LlmProvider
+from privatedataremover.core.settings import AppSettings, LlmProvider, coerce_provider
 
 
 @dataclass(frozen=True)
@@ -19,8 +19,19 @@ class LocalOnlyBlockedError(RuntimeError):
     """Raised when an external API call is attempted in local-only mode."""
 
 
+def list_ollama_models(base_url: str) -> list[str]:
+    """Return installed Ollama model names from /api/tags."""
+    base = (base_url or "http://localhost:11434").rstrip("/")
+    with httpx.Client(timeout=10.0) as client:
+        resp = client.get(f"{base}/api/tags")
+        resp.raise_for_status()
+        data = resp.json()
+    names = [str(m.get("name", "")).strip() for m in data.get("models", [])]
+    return sorted({n for n in names if n})
+
+
 def ensure_provider_allowed(settings: AppSettings, provider: LlmProvider) -> None:
-    if settings.local_only and provider != LlmProvider.OLLAMA:
+    if settings.local_only and coerce_provider(provider) != LlmProvider.OLLAMA:
         raise LocalOnlyBlockedError(
             "로컬 전용 모드에서는 Ollama만 사용할 수 있습니다. "
             "설정에서 로컬 전용 모드를 끄거나 프로바이더를 Ollama로 변경하세요."
@@ -29,7 +40,7 @@ def ensure_provider_allowed(settings: AppSettings, provider: LlmProvider) -> Non
 
 def probe_connection(settings: AppSettings, provider: LlmProvider | None = None) -> ConnectionResult:
     """Probe the selected (or given) LLM provider."""
-    target = provider or settings.llm_provider
+    target = coerce_provider(provider or settings.llm_provider)
     try:
         ensure_provider_allowed(settings, target)
     except LocalOnlyBlockedError as exc:

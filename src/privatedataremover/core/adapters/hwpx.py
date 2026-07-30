@@ -19,6 +19,22 @@ from privatedataremover.core.adapters.base import (
 )
 from privatedataremover.core.export_utils import file_sha256
 
+# Common Hancom HWPML local-names that hold visible text.
+_TEXT_LOCAL_NAMES = frozenset(
+    {
+        "t",
+        "text",
+        "char",
+        "hl",  # highlight run sometimes wraps text
+    }
+)
+
+_CONTENTS_XML = re.compile(r"^Contents/.+\.xml$", re.IGNORECASE)
+_SECTION_XML = re.compile(r"Contents/section\d+\.xml$", re.IGNORECASE)
+_HEADER_FOOTER = re.compile(
+    r"Contents/(header|footer)\d*\.xml$", re.IGNORECASE
+)
+
 
 def _local(tag: str) -> str:
     if "}" in tag:
@@ -26,15 +42,38 @@ def _local(tag: str) -> str:
     return tag
 
 
-def _iter_text_nodes(root: ET.Element) -> list[ET.Element]:
-    """Collect elements that look like text runs (t, t span, etc.)."""
-    nodes: list[ET.Element] = []
+def _iter_text_nodes(root: ET.Element) -> list[tuple[str, ET.Element]]:
+    """Return (text, element) for text-bearing HWPML nodes.
+
+    Prefers dedicated text run tags (e.g. hp:t). Falls back to any element
+    whose direct text is non-empty to tolerate schema drift.
+    """
+    preferred: list[tuple[str, ET.Element]] = []
+    fallback: list[tuple[str, ET.Element]] = []
     for el in root.iter():
+        raw = el.text
+        if not raw:
+            continue
+        text = raw.strip()
+        if not text:
+            continue
         name = _local(el.tag).lower()
-        if name in {"t", "text", "char"} or (el.text and el.text.strip() and name.endswith("t")):
-            if el.text and el.text.strip():
-                nodes.append(el)
-    return nodes
+        if name in _TEXT_LOCAL_NAMES or name.endswith(":t") or name == "t":
+            preferred.append((text, el))
+        else:
+            # Skip giant container blobs when preferred runs exist later
+            if len(text) <= 500:
+                fallback.append((text, el))
+    return preferred if preferred else fallback
+
+
+def _collect_xml_names(zf: zipfile.ZipFile) -> list[str]:
+    names = [n.replace("\\", "/") for n in zf.namelist()]
+    headers = sorted(n for n in names if _HEADER_FOOTER.search(n))
+    sections = sorted(n for n in names if _SECTION_XML.search(n))
+    if sections or headers:
+        return headers + sections
+    return sorted(n for n in names if _CONTENTS_XML.match(n))
 
 
 class HwpxAdapter(DocumentAdapter):
@@ -44,7 +83,7 @@ class HwpxAdapter(DocumentAdapter):
 
     def __init__(self) -> None:
         self._path: Path | None = None
-        self._sections: list[tuple[str, bytes]] = []  # (arcname, xml bytes)
+        self._sections: list[tuple[str, bytes]] = []
         self._original_sha256: str | None = None
 
     @property
@@ -60,29 +99,11 @@ class HwpxAdapter(DocumentAdapter):
             raise ValueError("유효한 HWPX(ZIP) 파일이 아닙니다.")
         sections: list[tuple[str, bytes]] = []
         with zipfile.ZipFile(path, "r") as zf:
-            names = [
-                n
-                for n in zf.namelist()
-                if re.search(r"Contents/section\d+\.xml$", n.replace("\\", "/"))
-                or n.replace("\\", "/").endswith("header.xml")
-            ]
-            # Prefer section*.xml ordered; include header
-            sections_only = sorted(
-                n for n in names if "section" in n.replace("\\", "/").lower()
-            )
-            headers = [n for n in names if n.replace("\\", "/").endswith("header.xml")]
-            ordered = headers + sections_only
+            ordered = _collect_xml_names(zf)
             if not ordered:
-                # Fallback: any Contents/*.xml
-                ordered = sorted(
-                    n
-                    for n in zf.namelist()
-                    if n.replace("\\", "/").startswith("Contents/") and n.endswith(".xml")
-                )
+                raise ValueError("HWPX에서 본문 XML 섹션을 찾지 못했습니다.")
             for name in ordered:
                 sections.append((name, zf.read(name)))
-        if not sections:
-            raise ValueError("HWPX에서 본문 XML 섹션을 찾지 못했습니다.")
         self._path = path
         self._sections = sections
         self._original_sha256 = file_sha256(path)
@@ -99,25 +120,22 @@ class HwpxAdapter(DocumentAdapter):
 
     def iter_units(self) -> Iterator[DocumentUnit]:
         for i, (name, data) in enumerate(self._sections):
-            # Rough size from text length
             text_len = len(self._plain_text(data))
+            kind = "header/footer" if _HEADER_FOOTER.search(name) else "section"
             yield DocumentUnit(
                 index=i,
-                label=Path(name).name,
+                label=f"{Path(name).name} [{kind}]",
                 width=400.0,
                 height=float(max(200, text_len // 2)),
-                meta={"section": name},
+                meta={"section": name, "kind": kind},
             )
 
     def extract_spans(self, unit_index: int) -> Sequence[ExtractedSpan]:
         self._require()
-        name, data = self._sections[unit_index]
+        _name, data = self._sections[unit_index]
         root = ET.fromstring(data)
         spans: list[ExtractedSpan] = []
-        for i, node in enumerate(_iter_text_nodes(root)):
-            text = (node.text or "").strip()
-            if not text:
-                continue
+        for i, (text, _node) in enumerate(_iter_text_nodes(root)):
             spans.append(
                 ExtractedSpan(
                     unit_index=unit_index,
@@ -170,21 +188,20 @@ class HwpxAdapter(DocumentAdapter):
         for m in masks:
             if m.label and m.label not in ("(수동 마스킹)", "(패턴 마스킹)"):
                 needles.append(m.label.strip())
-        needles = [n for n in needles if n]
-        # Also collect from bbox-index spans if labels empty — use extract
         if not needles:
             for m in masks:
                 spans = self.extract_spans(m.unit_index)
                 idx = int(m.bbox.y0)
                 if 0 <= idx < len(spans):
                     needles.append(spans[idx].text)
+        # Longer needles first to avoid partial clobbering
+        needles = sorted({n for n in needles if n}, key=len, reverse=True)
 
         shutil.copy2(self._path, dest)  # type: ignore[arg-type]
         if not needles or not text_remove:
             self.assert_original_untouched()
             return
 
-        # Rewrite XML entries inside the zip
         tmp = dest.with_suffix(dest.suffix + ".tmp")
         with zipfile.ZipFile(dest, "r") as zin, zipfile.ZipFile(
             tmp, "w", compression=zipfile.ZIP_DEFLATED
@@ -204,7 +221,7 @@ class HwpxAdapter(DocumentAdapter):
                 zout.writestr(info, data)
         tmp.replace(dest)
         self.assert_original_untouched()
-        _ = draw_black_boxes  # visual boxes not applicable to XML run MVP
+        _ = draw_black_boxes
 
     def export_rasterized(
         self,
@@ -214,11 +231,9 @@ class HwpxAdapter(DocumentAdapter):
         dpi: int = 200,
     ) -> None:
         import fitz
-
-        self._require()
-        # Build masked copy in memory path then rasterize previews
         import tempfile
 
+        self._require()
         with tempfile.TemporaryDirectory(prefix="pdr_hwpx_") as td:
             tmp = Path(td) / "masked.hwpx"
             self.export_safe(tmp, masks)
@@ -240,8 +255,8 @@ class HwpxAdapter(DocumentAdapter):
 
     def _plain_text(self, data: bytes) -> str:
         root = ET.fromstring(data)
-        parts = [(n.text or "").strip() for n in _iter_text_nodes(root)]
-        return "\n".join(p for p in parts if p)
+        parts = [text for text, _ in _iter_text_nodes(root)]
+        return "\n".join(parts)
 
     def _require(self) -> None:
         if not self._sections or self._path is None:

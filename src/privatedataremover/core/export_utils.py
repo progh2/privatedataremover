@@ -25,7 +25,7 @@ def file_sha256(path: Path) -> str:
 
 
 def find_residual_texts(pdf_path: Path, forbidden: Sequence[str]) -> list[ResidualHit]:
-    """Return forbidden strings still extractable from the PDF."""
+    """Return forbidden strings still extractable from a PDF."""
     import fitz
 
     cleaned = [t.strip() for t in forbidden if t and t.strip()]
@@ -42,6 +42,35 @@ def find_residual_texts(pdf_path: Path, forbidden: Sequence[str]) -> list[Residu
                     hits.append(ResidualHit(text=needle, page_index=i))
     finally:
         doc.close()
+    return hits
+
+
+def find_residual_in_xlsx(xlsx_path: Path, forbidden: Sequence[str]) -> list[ResidualHit]:
+    """Return forbidden strings still present in workbook cell values."""
+    try:
+        import openpyxl
+    except ImportError:
+        return []
+
+    cleaned = [t.strip() for t in forbidden if t and t.strip()]
+    if not cleaned:
+        return []
+
+    hits: list[ResidualHit] = []
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+    try:
+        for sheet_index, name in enumerate(wb.sheetnames):
+            ws = wb[name]
+            for row in ws.iter_rows():
+                for cell in row:
+                    if cell.value is None:
+                        continue
+                    value = str(cell.value)
+                    for needle in cleaned:
+                        if needle in value:
+                            hits.append(ResidualHit(text=needle, page_index=sheet_index))
+    finally:
+        wb.close()
     return hits
 
 

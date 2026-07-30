@@ -5,10 +5,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread
 from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QFileDialog,
     QHBoxLayout,
@@ -28,12 +27,12 @@ from PySide6.QtWidgets import (
 from privatedataremover import __version__
 from privatedataremover.core.adapters.base import BBox, DocumentAdapter, MaskSource, PiiType
 from privatedataremover.core.adapters.factory import open_document, supported_extensions
-from privatedataremover.core.export_utils import find_residual_texts
+from privatedataremover.core.export_utils import find_residual_in_xlsx, find_residual_texts
 from privatedataremover.core.history import HistoryStack, restore_session, snapshot_from_session
 from privatedataremover.core.pattern import find_similar_pages, page_fingerprint
 from privatedataremover.core.pattern.apply import PatternProposal, SeedMask, build_pattern_items
-from privatedataremover.core.pii import DetectionStatus, new_id
-from privatedataremover.core.pii.pipeline import analyze_document
+from privatedataremover.core.pii import DetectionStatus, PII_TYPE_LABELS, new_id
+from privatedataremover.core.pii.pipeline import AnalyzeResult
 from privatedataremover.core.pii.session import DetectionSession
 from privatedataremover.core.settings import AppSettings, load_settings, save_settings
 from privatedataremover.ui.detection_panel import DetectionPanel
@@ -41,6 +40,7 @@ from privatedataremover.ui.export_dialog import RasterExportDialog
 from privatedataremover.ui.pattern_dialog import PatternApplyDialog
 from privatedataremover.ui.pdf_view import PdfPreview
 from privatedataremover.ui.settings_dialog import SettingsDialog
+from privatedataremover.ui.workers import AnalyzeWorker, ExportWorker, start_worker
 
 
 class MainWindow(QMainWindow):
@@ -59,6 +59,9 @@ class MainWindow(QMainWindow):
         self._draw_mode = False
         self._ignore_region_mode = False
         self._last_pattern_id: str | None = None
+        self._job_thread: QThread | None = None
+        self._job_worker = None
+        self._progress: QProgressDialog | None = None
 
         self.page_list = QListWidget()
         self.page_list.setMinimumWidth(140)
@@ -151,10 +154,12 @@ class MainWindow(QMainWindow):
 
         self.act_undo = QAction("실행 취소", self)
         self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        self.act_undo.setToolTip("방금 한 작업 되돌리기 (Ctrl+Z)")
         self.act_undo.triggered.connect(self.undo)
 
         self.act_redo = QAction("다시 실행", self)
         self.act_redo.setShortcut(QKeySequence.StandardKey.Redo)
+        self.act_redo.setToolTip("되돌린 작업 다시 실행 (Ctrl+Y)")
         self.act_redo.triggered.connect(self.redo)
 
         self.act_delete = QAction("선택 마스킹 삭제", self)
@@ -262,7 +267,22 @@ class MainWindow(QMainWindow):
         if path:
             self.open_document_path(Path(path))
 
+    def _is_busy(self) -> bool:
+        thread = self._job_thread
+        if thread is None:
+            return False
+        try:
+            return thread.isRunning()
+        except RuntimeError:  # C++ object already deleted
+            self._job_thread = None
+            return False
+
     def open_document_path(self, path: Path) -> None:
+        if self._is_busy():
+            QMessageBox.information(
+                self, "작업 중", "분석/저장이 끝날 때까지 기다려 주세요."
+            )
+            return
         try:
             if self.adapter is not None:
                 self.adapter.close()
@@ -283,6 +303,20 @@ class MainWindow(QMainWindow):
         for unit in self.adapter.iter_units():
             item = QListWidgetItem(unit.label)
             item.setData(Qt.ItemDataRole.UserRole, unit.index)
+            tips: list[str] = []
+            meta = unit.meta or {}
+            if meta.get("hidden"):
+                tips.append("숨긴 시트" + (" (veryHidden)" if meta.get("very_hidden") else ""))
+            if meta.get("hidden_row_count"):
+                tips.append(f"숨긴 행 {meta['hidden_row_count']}개")
+            if meta.get("hidden_col_count"):
+                tips.append(f"숨긴 열 {meta['hidden_col_count']}개")
+            if meta.get("section"):
+                tips.append(str(meta["section"]))
+            if meta.get("kind"):
+                tips.append(str(meta["kind"]))
+            if tips:
+                item.setToolTip(" · ".join(tips))
             self.page_list.addItem(item)
 
         self.setWindowTitle(f"Private Data Remover — {path.name}")
@@ -327,25 +361,88 @@ class MainWindow(QMainWindow):
         if self.adapter is None or self._unit_count() == 0:
             QMessageBox.information(self, "분석", "먼저 문서를 열어 주세요.")
             return
+        if self._is_busy():
+            QMessageBox.information(self, "분석", "이미 작업이 진행 중입니다.")
+            return
+        path = self.adapter.path
+        if path is None:
+            QMessageBox.warning(self, "분석", "문서 경로를 알 수 없습니다.")
+            return
 
-        progress = QProgressDialog("개인정보를 분석하는 중…", "취소", 0, 0, self)
+        total = self._unit_count()
+        progress = QProgressDialog(
+            "개인정보를 분석하는 중…", "취소", 0, max(total, 1), self
+        )
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
         progress.show()
-        QApplication.processEvents()
+        self._progress = progress
 
-        try:
-            result = analyze_document(
-                self.adapter,
-                self.settings,
-                use_ocr=self.chk_use_ocr.isChecked(),
-                use_llm=self.chk_use_llm.isChecked(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            progress.close()
-            QMessageBox.critical(self, "분석 실패", str(exc))
+        worker = AnalyzeWorker(
+            path,
+            self.settings,
+            use_ocr=self.chk_use_ocr.isChecked(),
+            use_llm=self.chk_use_llm.isChecked(),
+        )
+        # Lambda runs in the GUI thread and sets a plain bool; a queued slot
+        # would never be delivered while worker.run() blocks its event loop.
+        progress.canceled.connect(lambda: worker.request_cancel())
+        worker.progress.connect(self._on_analyze_progress)
+        worker.finished.connect(self._on_analyze_finished)
+        worker.failed.connect(self._on_analyze_failed)
+
+        self.act_analyze.setEnabled(False)
+        self._start_job(worker)
+
+    def _start_job(self, worker) -> None:
+        """Start worker on a parented QThread; release refs only when it ends."""
+        self._job_worker = worker
+        thread = start_worker(worker, parent=self)
+        thread.finished.connect(self._on_job_thread_finished)
+        self._job_thread = thread
+
+    def _on_job_thread_finished(self) -> None:
+        thread = self._job_thread
+        self._job_thread = None
+        self._job_worker = None
+        if thread is not None:
+            thread.deleteLater()
+
+    def _on_analyze_progress(self, current: int, total: int, message: str) -> None:
+        progress = self._progress
+        if progress is None:
             return
-        progress.close()
+        if total > 0 and progress.maximum() != total:
+            progress.setMaximum(total)
+        # setValue() on a modal QProgressDialog processes events, so the
+        # finished handler may run here and null out self._progress.
+        progress.setValue(min(current, total))
+        if self._progress is not progress:
+            return
+        progress.setLabelText(message)
+        self.statusBar().showMessage(message, 0)
+
+    def _on_analyze_finished(self, result: object) -> None:
+        self._clear_job_ui()
+        if not isinstance(result, AnalyzeResult):
+            return
+        if result.cancelled:
+            if result.items:
+                self._push_history("analyze")
+                added = self.session.add_items(result.items)
+                self._refresh_detection_ui()
+                self._update_status()
+                QMessageBox.information(
+                    self,
+                    "분석 취소",
+                    f"취소되었습니다. 지금까지 찾은 후보 {added}건을 반영했습니다.",
+                )
+            else:
+                self.statusBar().showMessage("분석이 취소되었습니다.", 4000)
+            return
 
         self._push_history("analyze")
         added = self.session.add_items(result.items)
@@ -363,35 +460,62 @@ class MainWindow(QMainWindow):
         self._update_status()
         QMessageBox.information(self, "분석 완료", "\n".join(msg_parts))
 
+    def _on_analyze_failed(self, message: str) -> None:
+        self._clear_job_ui()
+        QMessageBox.critical(self, "분석 실패", message)
+
+    def _clear_job_ui(self) -> None:
+        # Do NOT drop thread/worker refs here: the thread is still running at
+        # this point and losing the last Python reference destroys the C++
+        # QThread mid-flight, crashing the app. Refs are released in
+        # _on_job_thread_finished once the thread has fully stopped.
+        if self._progress is not None:
+            self._progress.close()
+            self._progress = None
+        self.act_analyze.setEnabled(True)
+        self.act_safe_save.setEnabled(self.adapter is not None)
+        self.act_raster_save.setEnabled(self.adapter is not None)
+
     # --- detection actions ---
 
     def _refresh_detection_ui(self) -> None:
-        ptype = self.detection_panel.filter_pii_type()
-        status_filter = self.detection_panel.filter_status_value()
-        hide_terminal = status_filter == "active"
-        status = status_filter if isinstance(status_filter, DetectionStatus) else None
+        # Re-entrancy guard: populate()/setCurrentRow can fire selection
+        # signals that call back into this method and recurse until crash.
+        if getattr(self, "_refreshing_ui", False):
+            return
+        self._refreshing_ui = True
+        try:
+            ptype = self.detection_panel.filter_pii_type()
+            status_filter = self.detection_panel.filter_status_value()
+            hide_terminal = status_filter == "active"
+            status = (
+                status_filter if isinstance(status_filter, DetectionStatus) else None
+            )
 
-        items = self.session.filtered(
-            pii_type=ptype,
-            status=status,
-            hide_terminal=hide_terminal,
-        )
-        # When "active", show pending+confirmed
-        if hide_terminal:
-            items = [
+            items = self.session.filtered(
+                pii_type=ptype,
+                status=status,
+                hide_terminal=hide_terminal,
+            )
+            # When "active", show pending+confirmed
+            if hide_terminal:
+                items = [
+                    i
+                    for i in self.session.filtered(pii_type=ptype)
+                    if i.status
+                    in (DetectionStatus.PENDING, DetectionStatus.CONFIRMED)
+                ]
+
+            self.detection_panel.populate(items, self._selected_id)
+            page_items = [
                 i
-                for i in self.session.filtered(pii_type=ptype)
-                if i.status in (DetectionStatus.PENDING, DetectionStatus.CONFIRMED)
+                for i in self.session.items
+                if i.unit_index == self._page_index
+                and i.status not in (DetectionStatus.IGNORED,)
             ]
-
-        self.detection_panel.populate(items, self._selected_id)
-        page_items = [
-            i
-            for i in self.session.items
-            if i.unit_index == self._page_index
-            and i.status not in (DetectionStatus.IGNORED,)
-        ]
-        self.preview.set_overlays(page_items, self._selected_id)
+            self.preview.set_overlays(page_items, self._selected_id)
+        finally:
+            self._refreshing_ui = False
 
     def _on_detection_selected(self, item_id: str) -> None:
         self._selected_id = item_id
@@ -403,7 +527,45 @@ class MainWindow(QMainWindow):
 
     def _on_overlay_clicked(self, item_id: str) -> None:
         self._selected_id = item_id
+        item = self.session.get(item_id)
+        if item is not None:
+            panel = self.detection_panel
+            # Make sure the clicked item is visible in the list: relax the
+            # type filter (모든 유형), and the status filter if it hides it.
+            ptype = panel.filter_pii_type()
+            if ptype is not None and ptype != item.pii_type:
+                panel.show_all_types()
+            status_filter = panel.filter_status_value()
+            hidden = (
+                isinstance(status_filter, DetectionStatus)
+                and status_filter != item.status
+            ) or (
+                status_filter == "active"
+                and item.status
+                not in (DetectionStatus.PENDING, DetectionStatus.CONFIRMED)
+            )
+            if hidden:
+                panel.show_all_statuses()
         self._refresh_detection_ui()
+
+    _HISTORY_LABELS = {
+        "analyze": "분석",
+        "pattern_apply": "패턴 적용",
+        "pattern_rollback": "패턴 적용 취소",
+        "confirm": "마스킹 확정",
+        "ignore": "무시",
+        "cancel": "마스킹 취소",
+        "confirm_all": "모두 확정",
+        "cancel_type": "유형 전체 취소",
+        "ignore_type": "유형 무시",
+        "ignore_region": "무시 영역 추가",
+        "manual_mask": "수동 마스킹",
+        "delete": "마스킹 삭제",
+        "clear_page": "페이지 마스킹 지우기",
+    }
+
+    def _history_label(self, key: str) -> str:
+        return self._HISTORY_LABELS.get(key, key or "작업")
 
     def _push_history(self, label: str = "") -> None:
         self.history.push(snapshot_from_session(self.session, label=label))
@@ -414,10 +576,15 @@ class MainWindow(QMainWindow):
         if prev is None:
             self.statusBar().showMessage("되돌릴 작업이 없습니다.", 2000)
             return
+        # Carry the action name onto the redo snapshot so redo can show it.
+        current.label = prev.label
         restore_session(self.session, prev)
         self._selected_id = None
         self._refresh_detection_ui()
         self._update_status()
+        self.statusBar().showMessage(
+            f"실행 취소: {self._history_label(prev.label)}", 3000
+        )
 
     def redo(self) -> None:
         current = snapshot_from_session(self.session)
@@ -429,6 +596,9 @@ class MainWindow(QMainWindow):
         self._selected_id = None
         self._refresh_detection_ui()
         self._update_status()
+        self.statusBar().showMessage(
+            f"다시 실행: {self._history_label(nxt.label)}", 3000
+        )
 
     def apply_pattern_to_similar(self) -> None:
         if self.adapter is None or self._unit_count() == 0:
@@ -513,21 +683,39 @@ class MainWindow(QMainWindow):
         self._update_status()
         self.statusBar().showMessage(f"패턴 마스크 {n}개 제거", 3000)
 
+    def _next_selection_after(self, item_id: str) -> str | None:
+        """Pick the item below (or above, at the end) for fast review flow."""
+        ids = self.detection_panel.ordered_ids()
+        if item_id not in ids:
+            return self._selected_id
+        idx = ids.index(item_id)
+        if idx + 1 < len(ids):
+            return ids[idx + 1]
+        if idx > 0:
+            return ids[idx - 1]
+        return None
+
     def _confirm_item(self, item_id: str) -> None:
         self._push_history("confirm")
+        nxt = self._next_selection_after(item_id)
         self.session.confirm(item_id)
+        self._selected_id = nxt
         self._refresh_detection_ui()
         self._update_status()
 
     def _ignore_item(self, item_id: str) -> None:
         self._push_history("ignore")
+        nxt = self._next_selection_after(item_id)
         self.session.ignore(item_id)
+        self._selected_id = nxt
         self._refresh_detection_ui()
         self._update_status()
 
     def _cancel_item(self, item_id: str) -> None:
         self._push_history("cancel")
+        nxt = self._next_selection_after(item_id)
         self.session.cancel_mask(item_id)
+        self._selected_id = nxt
         self._refresh_detection_ui()
         self._update_status()
 
@@ -538,7 +726,18 @@ class MainWindow(QMainWindow):
         self._update_status()
         self.statusBar().showMessage(f"{n}건 마스킹 확정", 3000)
 
-    def _cancel_type(self, ptype: PiiType | None) -> None:
+    @staticmethod
+    def _coerce_pii_type(value) -> PiiType | None:
+        """PiiType is a str Enum, so Signal(object) delivers it as plain str."""
+        if value is None or isinstance(value, PiiType):
+            return value
+        try:
+            return PiiType(value)
+        except ValueError:
+            return None
+
+    def _cancel_type(self, ptype) -> None:
+        ptype = self._coerce_pii_type(ptype)
         if ptype is None:
             item = self.session.get(self._selected_id) if self._selected_id else None
             if not item:
@@ -551,9 +750,11 @@ class MainWindow(QMainWindow):
         n = self.session.cancel_by_type(ptype)
         self._refresh_detection_ui()
         self._update_status()
-        self.statusBar().showMessage(f"{ptype.value} {n}건 마스킹 취소", 3000)
+        label = PII_TYPE_LABELS.get(ptype, ptype.value)
+        self.statusBar().showMessage(f"{label} {n}건 마스킹 취소", 3000)
 
-    def _ignore_type(self, ptype: PiiType | None) -> None:
+    def _ignore_type(self, ptype) -> None:
+        ptype = self._coerce_pii_type(ptype)
         if ptype is None:
             item = self.session.get(self._selected_id) if self._selected_id else None
             if not item:
@@ -566,6 +767,8 @@ class MainWindow(QMainWindow):
         self.session.ignore_type(ptype)
         self._refresh_detection_ui()
         self._update_status()
+        label = PII_TYPE_LABELS.get(ptype, ptype.value)
+        self.statusBar().showMessage(f"{label} 유형을 무시합니다.", 3000)
 
     def _toggle_draw_mode(self, enabled: bool) -> None:
         if enabled and self.act_ignore_region.isChecked():
@@ -595,17 +798,25 @@ class MainWindow(QMainWindow):
         elif not self._draw_mode:
             self.statusBar().showMessage("", 1)
 
-    def _on_region_drawn(self, bbox: BBox) -> None:
-        if self._ignore_region_mode:
-            self._push_history("ignore_region")
-            self.session.add_ignore_region(self._page_index, bbox)
-            self.statusBar().showMessage("무시 영역을 추가했습니다.", 3000)
-            return
-        self._push_history("manual_mask")
-        item = self.session.add_manual(self._page_index, bbox)
-        self._selected_id = item.id
-        self._refresh_detection_ui()
-        self._update_status()
+    def _on_region_drawn(self, bbox_obj) -> None:
+        try:
+            if not isinstance(bbox_obj, BBox):
+                return
+            bbox = bbox_obj
+            if self._ignore_region_mode:
+                self._push_history("ignore_region")
+                self.session.add_ignore_region(self._page_index, bbox)
+                self.statusBar().showMessage(
+                    f"무시 영역 추가 (페이지 {self._page_index + 1})", 3000
+                )
+                return
+            self._push_history("manual_mask")
+            item = self.session.add_manual(self._page_index, bbox)
+            self._selected_id = item.id
+            self._refresh_detection_ui()
+            self._update_status()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "영역 처리 오류", str(exc))
 
     def _delete_selected(self) -> None:
         if not self._selected_id:
@@ -744,7 +955,13 @@ class MainWindow(QMainWindow):
     def save_safe(self) -> None:
         if self.adapter is None or self._unit_count() == 0:
             return
+        if self._is_busy():
+            QMessageBox.information(self, "저장", "이미 작업이 진행 중입니다.")
+            return
         if not self._confirm_before_export():
+            return
+        src = self.adapter.path
+        if src is None:
             return
         fmt = self.adapter.format_id
         filters = {
@@ -760,28 +977,18 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        dest = Path(path)
-        progress = QProgressDialog("안전 저장 중…", None, 0, 0, self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.show()
-        QApplication.processEvents()
-        try:
-            self.adapter.export_safe(dest, self.session.masks())
-            if fmt == "pdf":
-                self._verify_export(dest)
-            self.adapter.assert_original_untouched()
-        except Exception as exc:  # noqa: BLE001
-            progress.close()
-            QMessageBox.critical(self, "저장 실패", str(exc))
-            return
-        progress.close()
-        QMessageBox.information(self, "저장 완료", f"저장했습니다:\n{dest}")
+        self._start_export(src, Path(path), mode="safe", dpi=150, verify_fmt=fmt)
 
     def save_rasterized(self) -> None:
         if self.adapter is None or self._unit_count() == 0:
             return
+        if self._is_busy():
+            QMessageBox.information(self, "저장", "이미 작업이 진행 중입니다.")
+            return
         if not self._confirm_before_export():
+            return
+        src = self.adapter.path
+        if src is None:
             return
         opts = RasterExportDialog(self)
         if not opts.exec():
@@ -794,27 +1001,68 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        dest = Path(path)
-        progress = QProgressDialog("이미지화 저장 중…", None, 0, 0, self)
+        self._start_export(
+            src, Path(path), mode="raster", dpi=opts.dpi(), verify_fmt="pdf"
+        )
+
+    def _start_export(
+        self,
+        src: Path,
+        dest: Path,
+        *,
+        mode: str,
+        dpi: int,
+        verify_fmt: str,
+    ) -> None:
+        progress = QProgressDialog(
+            "안전 저장 중…" if mode == "safe" else "이미지화 저장 중…",
+            None,
+            0,
+            0,
+            self,
+        )
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.show()
-        QApplication.processEvents()
+        self._progress = progress
+        self._export_verify_fmt = verify_fmt
+
+        worker = ExportWorker(
+            src,
+            dest,
+            self.session.masks(),
+            mode=mode,
+            dpi=dpi,
+        )
+        worker.progress.connect(lambda msg: progress.setLabelText(msg))
+        worker.finished.connect(self._on_export_finished)
+        worker.failed.connect(self._on_export_failed)
+
+        self.act_analyze.setEnabled(False)
+        self.act_safe_save.setEnabled(False)
+        self.act_raster_save.setEnabled(False)
+        self._start_job(worker)
+
+    def _on_export_finished(self, dest_obj: object) -> None:
+        self._clear_job_ui()
+        dest = Path(str(dest_obj))
         try:
-            self.adapter.export_rasterized(
-                dest, self.session.masks(), dpi=opts.dpi()
-            )
-            self._verify_export(dest)
-            self.adapter.assert_original_untouched()
+            if getattr(self, "_export_verify_fmt", "") == "pdf":
+                self._verify_export(dest)
+            if self.adapter is not None:
+                self.adapter.assert_original_untouched()
         except Exception as exc:  # noqa: BLE001
-            progress.close()
-            QMessageBox.critical(self, "저장 실패", str(exc))
-            return
-        progress.close()
+            QMessageBox.warning(self, "저장 후 검사", str(exc))
         QMessageBox.information(self, "저장 완료", f"저장했습니다:\n{dest}")
 
+    def _on_export_failed(self, message: str) -> None:
+        self._clear_job_ui()
+        QMessageBox.critical(self, "저장 실패", message)
+
     def _update_status(self) -> None:
-        provider = self.settings.llm_provider.value
+        self.act_undo.setEnabled(self.history.can_undo)
+        self.act_redo.setEnabled(self.history.can_redo)
+        provider = self.settings.provider.value
         local = "로컬 전용" if self.settings.local_only else "외부 API 허용"
         pending = sum(1 for i in self.session.items if i.status == DetectionStatus.PENDING)
         masked = len(self.session.masks())
@@ -831,6 +1079,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(text)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._is_busy():
+            QMessageBox.information(
+                self,
+                "작업 중",
+                "분석/저장이 진행 중입니다. 취소하거나 완료된 뒤 종료해 주세요.",
+            )
+            event.ignore()
+            return
         if self.adapter is not None:
             self.adapter.close()
         super().closeEvent(event)
