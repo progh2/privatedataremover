@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import shutil
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from privatedataremover.core.adapters.base import BBox, ExtractedSpan
 
@@ -11,6 +14,73 @@ from privatedataremover.core.adapters.base import BBox, ExtractedSpan
 class OcrAvailability:
     available: bool
     message: str
+    version: str = ""
+    languages: list[str] = field(default_factory=list)
+    resolved_cmd: str = ""
+
+
+def common_tesseract_candidates() -> list[str]:
+    """Likely install paths (OS-specific), first existing wins for auto-detect."""
+    found: list[str] = []
+    which = shutil.which("tesseract")
+    if which:
+        found.append(which)
+    if sys.platform.startswith("win"):
+        for base in (
+            Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
+            Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
+            Path.home() / r"AppData\Local\Programs\Tesseract-OCR\tesseract.exe",
+        ):
+            if base.is_file():
+                found.append(str(base))
+    elif sys.platform == "darwin":
+        for p in (
+            "/opt/homebrew/bin/tesseract",
+            "/usr/local/bin/tesseract",
+        ):
+            if Path(p).is_file():
+                found.append(p)
+    else:
+        for p in ("/usr/bin/tesseract", "/usr/local/bin/tesseract"):
+            if Path(p).is_file():
+                found.append(p)
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in found:
+        key = p.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
+
+
+def install_guide_text() -> str:
+    """Short Korean install tips for the settings dialog."""
+    if sys.platform.startswith("win"):
+        return (
+            "<b>Windows 설치 안내</b><br>"
+            "1. "
+            '<a href="https://github.com/UB-Mannheim/tesseract/wiki">'
+            "UB Mannheim Tesseract 설치 패키지</a>를 받아 설치하세요.<br>"
+            "2. 설치 시 <b>Additional language data</b>에서 "
+            "<code>Korean</code>·<code>English</code>를 함께 선택하세요.<br>"
+            "3. 기본 경로 예: "
+            "<code>C:\\Program Files\\Tesseract-OCR\\tesseract.exe</code><br>"
+            "4. PATH에 추가했거나 위 경로를 「찾아보기」로 지정한 뒤 "
+            "「Tesseract 확인」을 누르세요."
+        )
+    if sys.platform == "darwin":
+        return (
+            "<b>macOS 설치 안내</b><br>"
+            "<code>brew install tesseract tesseract-lang</code><br>"
+            "설치 후 「Tesseract 확인」으로 언어 팩(kor, eng)을 확인하세요."
+        )
+    return (
+        "<b>Linux 설치 안내</b><br>"
+        "Debian/Ubuntu: "
+        "<code>sudo apt install tesseract-ocr tesseract-ocr-kor</code><br>"
+        "설치 후 「Tesseract 확인」을 누르세요."
+    )
 
 
 def check_tesseract(tesseract_cmd: str = "") -> OcrAvailability:
@@ -18,20 +88,51 @@ def check_tesseract(tesseract_cmd: str = "") -> OcrAvailability:
         import pytesseract
         from pytesseract import TesseractNotFoundError
     except ImportError:
-        return OcrAvailability(False, "pytesseract가 설치되어 있지 않습니다.")
+        return OcrAvailability(
+            False,
+            "pytesseract가 설치되어 있지 않습니다. pip install pytesseract",
+        )
 
-    if tesseract_cmd.strip():
-        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd.strip()
+    cmd = tesseract_cmd.strip()
+    if not cmd:
+        candidates = common_tesseract_candidates()
+        cmd = candidates[0] if candidates else ""
+    if cmd:
+        pytesseract.pytesseract.tesseract_cmd = cmd
+
     try:
-        ver = pytesseract.get_tesseract_version()
-        return OcrAvailability(True, f"Tesseract {ver}")
+        ver = str(pytesseract.get_tesseract_version())
     except TesseractNotFoundError:
         return OcrAvailability(
             False,
-            "Tesseract를 찾을 수 없습니다. 설치 후 PATH에 추가하거나 설정에서 경로를 지정하세요.",
+            "Tesseract를 찾을 수 없습니다. 아래 설치 안내를 참고하거나 "
+            "설정에서 실행 파일 경로를 지정하세요.",
         )
     except Exception as exc:  # noqa: BLE001
         return OcrAvailability(False, f"Tesseract 확인 실패: {exc}")
+
+    langs: list[str] = []
+    try:
+        langs = sorted(pytesseract.get_languages(config=""))
+    except Exception:  # noqa: BLE001
+        langs = []
+
+    missing = [code for code in ("kor", "eng") if langs and code not in langs]
+    msg = f"Tesseract {ver} 인식됨"
+    if langs:
+        preview = ", ".join(langs[:12])
+        more = f" 외 {len(langs) - 12}개" if len(langs) > 12 else ""
+        msg += f" · 언어 {len(langs)}개 ({preview}{more})"
+    if missing:
+        msg += f" · 주의: {', '.join(missing)} 언어 팩이 없습니다"
+
+    return OcrAvailability(
+        True,
+        msg,
+        version=ver,
+        languages=langs,
+        resolved_cmd=cmd or (shutil.which("tesseract") or ""),
+    )
 
 
 def ocr_png_to_spans(

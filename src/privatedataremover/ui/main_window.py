@@ -85,8 +85,13 @@ class MainWindow(QMainWindow):
         splitter = QSplitter()
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(QLabel("페이지"))
+        left_layout.setContentsMargins(8, 8, 4, 8)
+        left_layout.setSpacing(6)
+        page_title = QLabel("페이지")
+        page_font = page_title.font()
+        page_font.setBold(True)
+        page_title.setFont(page_font)
+        left_layout.addWidget(page_title)
         left_layout.addWidget(self.page_list)
         splitter.addWidget(left)
         splitter.addWidget(self.preview)
@@ -98,7 +103,7 @@ class MainWindow(QMainWindow):
 
         container = QWidget()
         layout = QHBoxLayout(container)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
         self.setCentralWidget(container)
 
@@ -111,12 +116,13 @@ class MainWindow(QMainWindow):
     def _build_actions(self) -> None:
         self.act_open = QAction("열기…", self)
         self.act_open.setShortcut(QKeySequence.StandardKey.Open)
+        self.act_open.setToolTip("문서 열기 (Ctrl+O)")
         self.act_open.triggered.connect(self.open_file_dialog)
 
         self.act_safe_save = QAction("안전 저장…", self)
         self.act_safe_save.setEnabled(False)
         self.act_safe_save.setShortcut(QKeySequence.StandardKey.Save)
-        self.act_safe_save.setToolTip("텍스트 삭제 + 검정 박스로 사본 저장")
+        self.act_safe_save.setToolTip("텍스트 삭제 + 검정 박스로 사본 저장 (Ctrl+S)")
         self.act_safe_save.triggered.connect(self.save_safe)
 
         self.act_raster_save = QAction("페이지 이미지화 후 PDF로 저장…", self)
@@ -129,15 +135,18 @@ class MainWindow(QMainWindow):
         self.act_exit.triggered.connect(self.close)
 
         self.act_settings = QAction("설정…", self)
+        self.act_settings.setToolTip("LLM·OCR 설정")
         self.act_settings.triggered.connect(self.open_settings)
 
         self.act_analyze = QAction("개인정보 분석", self)
         self.act_analyze.setShortcut("Ctrl+R")
+        self.act_analyze.setToolTip("개인정보 분석 (Ctrl+R)")
         self.act_analyze.triggered.connect(self.run_analysis)
 
         self.act_draw = QAction("마스킹 그리기", self)
         self.act_draw.setCheckable(True)
         self.act_draw.setShortcut("M")
+        self.act_draw.setToolTip("마스킹 그리기 (M)")
         self.act_draw.toggled.connect(self._toggle_draw_mode)
 
         self.act_ignore_region = QAction("무시 영역 그리기", self)
@@ -147,6 +156,7 @@ class MainWindow(QMainWindow):
 
         self.act_apply_pattern = QAction("비슷한 페이지에 적용…", self)
         self.act_apply_pattern.setShortcut("Ctrl+Shift+A")
+        self.act_apply_pattern.setToolTip("확정 마스크를 비슷한 페이지에 일괄 적용 (Ctrl+Shift+A)")
         self.act_apply_pattern.triggered.connect(self.apply_pattern_to_similar)
 
         self.act_rollback_pattern = QAction("마지막 패턴 적용 취소", self)
@@ -177,18 +187,20 @@ class MainWindow(QMainWindow):
         self.act_zoom_out.setShortcut(QKeySequence.StandardKey.ZoomOut)
         self.act_zoom_out.triggered.connect(lambda: self._bump_zoom(1 / 1.1))
 
-        self.act_prev = QAction("이전 페이지", self)
+        self.act_prev = QAction("이전", self)
         self.act_prev.setShortcut(QKeySequence.StandardKey.MoveToPreviousPage)
+        self.act_prev.setToolTip("이전 페이지")
         self.act_prev.triggered.connect(lambda: self._goto_page(self._page_index - 1))
 
-        self.act_next = QAction("다음 페이지", self)
+        self.act_next = QAction("다음", self)
         self.act_next.setShortcut(QKeySequence.StandardKey.MoveToNextPage)
+        self.act_next.setToolTip("다음 페이지")
         self.act_next.triggered.connect(lambda: self._goto_page(self._page_index + 1))
 
         self.act_about = QAction("정보", self)
         self.act_about.triggered.connect(self._about)
 
-        self.chk_use_llm = QCheckBox("LLM 사용")
+        self.chk_use_llm = QCheckBox("LLM")
         self.chk_use_llm.setToolTip("규칙 탐지에 더해 설정한 LLM으로 추가 분석합니다.")
         self.chk_use_ocr = QCheckBox("OCR")
         self.chk_use_ocr.setChecked(True)
@@ -209,6 +221,7 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         edit_menu.addAction(self.act_draw)
         edit_menu.addAction(self.act_ignore_region)
+        edit_menu.addSeparator()
         edit_menu.addAction(self.act_delete)
         edit_menu.addAction(self.act_clear_page)
         edit_menu.addSeparator()
@@ -232,26 +245,26 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         bar = QToolBar("메인")
         bar.setMovable(False)
+        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.addToolBar(bar)
+        # 파일
         bar.addAction(self.act_open)
+        bar.addAction(self.act_safe_save)
         bar.addSeparator()
+        # 분석
         bar.addAction(self.act_analyze)
         bar.addWidget(self.chk_use_ocr)
         bar.addWidget(self.chk_use_llm)
         bar.addSeparator()
+        # 검토
         bar.addAction(self.act_undo)
-        bar.addAction(self.act_redo)
         bar.addAction(self.act_draw)
-        bar.addAction(self.act_ignore_region)
-        bar.addAction(self.act_apply_pattern)
-        bar.addAction(self.act_delete)
         bar.addSeparator()
+        # 탐색
         bar.addAction(self.act_prev)
         bar.addAction(self.act_next)
         bar.addSeparator()
-        bar.addAction(self.act_zoom_out)
-        bar.addAction(self.act_zoom_in)
-        bar.addSeparator()
+        # 기타
         bar.addAction(self.act_settings)
 
     # --- file / drag-drop ---
@@ -507,6 +520,15 @@ class MainWindow(QMainWindow):
                 ]
 
             self.detection_panel.populate(items, self._selected_id)
+            pending = sum(
+                1 for i in self.session.items if i.status == DetectionStatus.PENDING
+            )
+            confirmed = sum(
+                1 for i in self.session.items if i.status == DetectionStatus.CONFIRMED
+            )
+            self.detection_panel.set_summary(
+                pending, confirmed, len(self.session.items)
+            )
             page_items = [
                 i
                 for i in self.session.items

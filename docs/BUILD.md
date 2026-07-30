@@ -35,7 +35,3 @@ python scripts/make_sample_pdf.py
 ```
 
 `tests/fixtures/` 아래에 수동 테스트용 PDF가 생성됩니다.
-
-## CI
-
-GitHub Actions `.github/workflows/ci.yml`에서 `pytest`를 실행합니다.

@@ -28,6 +28,9 @@ def _color_for(item: DetectionItem) -> QColor:
     return base
 
 
+EMPTY_PREVIEW_HINT = "문서를 열거나 여기로 끌어다 놓으세요. (PDF / Excel / HWPX)"
+
+
 class OverlayLabel(QLabel):
     """Pixmap label that paints detection overlays and supports drag-rect."""
 
@@ -170,7 +173,7 @@ class PdfPreview(QScrollArea):
         self.setWidgetResizable(True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label = OverlayLabel()
-        self._label.setText("PDF를 열어 주세요.")
+        self._label.setText(EMPTY_PREVIEW_HINT)
         self.setWidget(self._label)
         self._scale = 1.25
         self._png: bytes | None = None
@@ -194,7 +197,7 @@ class PdfPreview(QScrollArea):
     ) -> None:
         self._label.set_items(items, selected_id)
 
-    def clear_preview(self, message: str = "PDF를 열어 주세요.") -> None:
+    def clear_preview(self, message: str = EMPTY_PREVIEW_HINT) -> None:
         self._png = None
         self._label.setPixmap(QPixmap())
         self._label.setText(message)

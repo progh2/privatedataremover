@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,6 +22,11 @@ from PySide6.QtWidgets import (
 )
 
 from privatedataremover.core.llm import list_ollama_models, probe_connection
+from privatedataremover.core.pii.ocr import (
+    check_tesseract,
+    common_tesseract_candidates,
+    install_guide_text,
+)
 from privatedataremover.core.settings import AppSettings, LlmProvider, coerce_provider
 
 
@@ -62,7 +68,11 @@ class SettingsDialog(QDialog):
         self.anthropic_model = QLineEdit()
 
         self.tesseract_cmd = QLineEdit()
+        self.tesseract_cmd.setPlaceholderText("비우면 PATH / 자동 검색 경로 사용")
         self.ocr_languages = QLineEdit()
+        self.ocr_languages.setPlaceholderText("예: kor+eng")
+        self.ocr_status_label = QLabel("")
+        self.ocr_status_label.setWordWrap(True)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
@@ -117,18 +127,51 @@ class SettingsDialog(QDialog):
         tabs.addTab(llm_tab, "LLM")
 
         ocr_tab = QWidget()
-        ocr_form = QFormLayout(ocr_tab)
+        ocr_layout = QVBoxLayout(ocr_tab)
+        ocr_form = QFormLayout()
+
         tess_row = QHBoxLayout()
-        tess_row.addWidget(self.tesseract_cmd)
+        tess_row.addWidget(self.tesseract_cmd, stretch=1)
         browse = QPushButton("찾아보기…")
         browse.clicked.connect(self._browse_tesseract)
+        auto_btn = QPushButton("자동 검색")
+        auto_btn.setToolTip("PATH 및 일반적인 설치 경로에서 Tesseract를 찾습니다.")
+        auto_btn.clicked.connect(self._auto_detect_tesseract)
         tess_row.addWidget(browse)
+        tess_row.addWidget(auto_btn)
         ocr_form.addRow("Tesseract 경로", tess_row)
         ocr_form.addRow("OCR 언어", self.ocr_languages)
-        hint = QLabel("예: kor+eng. 비어 있으면 시스템 PATH의 tesseract를 사용합니다.")
-        hint.setWordWrap(True)
-        ocr_form.addRow(hint)
+        lang_hint = QLabel(
+            "여러 언어는 <code>kor+eng</code>처럼 <code>+</code>로 연결합니다. "
+            "한국어 문서는 <code>kor</code> 언어 팩이 필요합니다."
+        )
+        lang_hint.setWordWrap(True)
+        lang_hint.setOpenExternalLinks(True)
+        ocr_form.addRow(lang_hint)
+        ocr_layout.addLayout(ocr_form)
+
+        check_row = QHBoxLayout()
+        check_btn = QPushButton("Tesseract 확인")
+        check_btn.setToolTip("설치 여부와 버전·언어 팩을 검사합니다.")
+        check_btn.clicked.connect(self._on_check_tesseract)
+        check_row.addWidget(check_btn)
+        check_row.addStretch()
+        ocr_layout.addLayout(check_row)
+        ocr_layout.addWidget(self.ocr_status_label)
+
+        guide = QLabel(install_guide_text())
+        guide.setWordWrap(True)
+        guide.setOpenExternalLinks(True)
+        guide.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        guide_box = QGroupBox("설치 안내")
+        guide_layout = QVBoxLayout(guide_box)
+        guide_layout.addWidget(guide)
+        ocr_layout.addWidget(guide_box)
+        ocr_layout.addStretch()
         tabs.addTab(ocr_tab, "OCR")
+
+        tabs.currentChanged.connect(self._on_tab_changed)
+        self._tabs = tabs
 
         layout.addWidget(tabs)
 
@@ -234,6 +277,10 @@ class SettingsDialog(QDialog):
                 self.provider_combo.findData(LlmProvider.OLLAMA)
             )
 
+    def _on_tab_changed(self, index: int) -> None:
+        if self._tabs.tabText(index) == "OCR" and not self.ocr_status_label.text():
+            self._on_check_tesseract()
+
     def _browse_tesseract(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -243,6 +290,55 @@ class SettingsDialog(QDialog):
         )
         if path:
             self.tesseract_cmd.setText(path)
+            self._on_check_tesseract()
+
+    def _auto_detect_tesseract(self) -> None:
+        candidates = common_tesseract_candidates()
+        if not candidates:
+            self.ocr_status_label.setText(
+                '<span style="color:#b00020">자동 검색으로 Tesseract를 찾지 못했습니다. '
+                "아래 설치 안내를 참고하세요.</span>"
+            )
+            QMessageBox.information(
+                self,
+                "자동 검색",
+                "일반적인 설치 경로에서 Tesseract를 찾지 못했습니다.\n"
+                "설치 후 「찾아보기」로 실행 파일을 지정하세요.",
+            )
+            return
+        self.tesseract_cmd.setText(candidates[0])
+        if len(candidates) > 1:
+            self.ocr_status_label.setText(
+                f"자동 검색: {len(candidates)}개 후보 중 첫 경로를 사용합니다."
+            )
+        self._on_check_tesseract()
+
+    def _on_check_tesseract(self) -> None:
+        cmd = self.tesseract_cmd.text().strip()
+        langs = self.ocr_languages.text().strip() or "kor+eng"
+        self.ocr_status_label.setText("Tesseract 확인 중…")
+        self.ocr_status_label.repaint()
+        result = check_tesseract(cmd)
+        color = "#0a7a2f" if result.available else "#b00020"
+        # Highlight missing language packs for the configured OCR languages
+        extra = ""
+        if result.available and result.languages:
+            wanted = [p for p in langs.replace(",", "+").split("+") if p.strip()]
+            missing = [w for w in wanted if w not in result.languages]
+            if missing:
+                color = "#b36b00"
+                extra = (
+                    f"<br>설정된 언어 중 없음: <b>{', '.join(missing)}</b> "
+                    "— 언어 팩을 설치하거나 OCR 언어를 바꾸세요."
+                )
+        if result.available and result.resolved_cmd and not cmd:
+            # Show discovered path so the user can optionally pin it
+            extra += f"<br>사용 경로: <code>{result.resolved_cmd}</code>"
+        self.ocr_status_label.setText(
+            f'<span style="color:{color}">{result.message}</span>{extra}'
+        )
+        if not result.available:
+            QMessageBox.warning(self, "Tesseract 확인", result.message)
 
     def _collect(self) -> AppSettings:
         return AppSettings(
