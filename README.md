@@ -5,7 +5,7 @@ PDF(및 향후 Office 문서)에서 개인정보를 탐지·검토·마스킹하
 
 | 항목 | 내용 |
 |------|------|
-| 버전 | **0.2.0** |
+| 버전 | **0.2.1** |
 | OS | Windows / macOS / Linux |
 | UI | PySide6 |
 | AI | Ollama(로컬) 또는 OpenAI / Anthropic(Claude) API |
@@ -56,13 +56,96 @@ PDF(및 향후 Office 문서)에서 개인정보를 탐지·검토·마스킹하
 ```text
 GUI (PySide6)
   └── Core (포맷 비의존 도메인)
-        ├── adapters/pdf      (MVP)
-        ├── adapters/xlsx     (planned)
-        ├── adapters/hwpx     (planned)
+        ├── adapters/pdf      (PDF)
+        ├── adapters/xlsx     (Excel)
+        ├── adapters/hwpx     (HWPX)
         ├── pii/              (rules + LLM)
         ├── pattern/
         ├── mask/ + undo
         └── export/
+```
+
+---
+
+## 동작 원리 (쉽게 이해하기)
+
+이 프로그램이 하는 일을 한 문장으로 줄이면 이렇습니다.
+
+> **문서에서 글자를 꺼내서 → 개인정보로 보이는 부분을 찾고 → 사람이 확인한 뒤 → 검게 가린 새 파일을 만든다.**
+
+### 1) 전체 흐름
+
+문서를 열고 저장하기까지의 과정입니다. 원본 파일은 절대 고치지 않고, 항상 **새 파일**을 만듭니다.
+
+```mermaid
+flowchart TD
+    A["문서 열기<br>(PDF · Excel · HWPX)"] --> B["글자 꺼내기"]
+    B --> C{"스캔한 이미지 문서인가?"}
+    C -- "예" --> D["OCR<br>(사진 속 글자를 읽어냄)"]
+    C -- "아니오" --> E["규칙 검사<br>(전화번호·주민번호 같은 패턴 찾기)"]
+    D --> E
+    E --> F["AI 검사 (선택)<br>(이름·주소처럼 패턴이 없는 것 찾기)"]
+    F --> G["후보 목록 표시"]
+    G --> H{"사람이 하나씩 검토"}
+    H -- "맞아요" --> I["마스킹 확정"]
+    H -- "아니에요" --> J["무시 / 취소"]
+    I --> K["저장"]
+    J --> H
+    K --> L["안전 저장<br>(글자 삭제 + 검정 박스)"]
+    K --> M["이미지화 저장<br>(페이지를 통째로 그림으로)"]
+```
+
+- **규칙 검사**: 전화번호(`010-1234-5678`)처럼 **모양이 정해진** 개인정보는 정규식 규칙으로 찾습니다.
+- **AI 검사**: 이름·주소처럼 모양이 제각각인 것은 AI(LLM)에게 "이 글에서 개인정보를 찾아줘"라고 물어봅니다.
+  로컬 Ollama를 쓰면 문서가 컴퓨터 밖으로 나가지 않습니다.
+
+### 2) 분석 버튼을 누르면 생기는 일
+
+분석은 시간이 걸릴 수 있어서 **뒤에서 일하는 일꾼(백그라운드 스레드)** 에게 맡깁니다.
+그래서 분석 중에도 화면이 멈추지 않고, 진행률과 취소 버튼이 동작합니다.
+
+```mermaid
+sequenceDiagram
+    actor 사용자
+    participant 화면 as 화면 (UI)
+    participant 일꾼 as 분석 일꾼 (백그라운드)
+    participant 엔진 as 탐지 엔진
+
+    사용자->>화면: "개인정보 분석" 클릭
+    화면->>일꾼: 분석 시작해 줘
+    activate 일꾼
+    loop 페이지마다
+        일꾼->>엔진: 이 페이지 검사해 줘
+        엔진-->>일꾼: 찾은 후보들
+        일꾼-->>화면: 진행률 알림 (3/10 페이지…)
+    end
+    일꾼-->>화면: 끝! 후보 목록 전달
+    deactivate 일꾼
+    화면-->>사용자: 목록·색깔 박스 표시
+    사용자->>화면: 확정 / 무시 / 취소 (Ctrl+Z로 되돌리기)
+```
+
+### 3) 여러 문서 형식을 다루는 방법
+
+문서 형식마다 "여는 법·글자 꺼내는 법·저장하는 법"이 다릅니다.
+그래서 형식마다 **어댑터**(변환 플러그)를 하나씩 두고, 나머지 프로그램은 어떤 형식인지 몰라도 되게 만들었습니다.
+새 형식을 지원하려면 어댑터만 하나 더 만들면 됩니다.
+
+```mermaid
+classDiagram
+    class DocumentAdapter {
+        <<추상: 공통 규격>>
+        +open(파일 열기)
+        +extract_spans(글자와 위치 꺼내기)
+        +export_safe(가려서 저장하기)
+        +export_rasterized(이미지로 저장하기)
+    }
+    class PdfAdapter["PdfAdapter (PDF)"]
+    class XlsxAdapter["XlsxAdapter (Excel)"]
+    class HwpxAdapter["HwpxAdapter (한글 HWPX)"]
+    DocumentAdapter <|-- PdfAdapter
+    DocumentAdapter <|-- XlsxAdapter
+    DocumentAdapter <|-- HwpxAdapter
 ```
 
 ---
@@ -120,9 +203,20 @@ ollama pull llama3.2
 
 ### 4) 실행
 
+프로젝트 루트의 실행 스크립트를 쓰거나, 직접 모듈할 수 있습니다.
+
+| OS | 명령 |
+|----|------|
+| Windows (CMD) | `run.cmd` |
+| Windows (PowerShell) | `.\run.ps1` |
+| Linux / macOS | `./run.sh` |
+
 ```bash
+# 또는
 python -m privatedataremover
 ```
+
+스크립트는 `.venv`/`venv`가 있으면 자동 활성화하고, 패키지가 없으면 `pip install -e ".[dev]"`를 시도합니다.
 
 앱이 실행되면 **파일 → 열기** 또는 PDF 드래그앤드롭으로 문서를 열고, **도구 → 설정**에서 LLM(Ollama/OpenAI/Claude)·로컬 전용 모드·Tesseract 경로를 구성할 수 있습니다.
 
@@ -177,6 +271,7 @@ pytest
 | M4 | Export ✅ (안전 저장 / 이미지화 PDF / 잔존 검사) |
 | M5 | Release v0.1.0 ✅ |
 | M6 | Excel / HWPX ✅ (adapter·숨김 시트·spike MVP) |
+| M7 | Hardening & Polish ✅ (크래시 수정·이름/주소 탐지·백그라운드 분석·검토 UX) |
 
 ---
 

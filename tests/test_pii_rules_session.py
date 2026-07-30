@@ -28,6 +28,56 @@ def test_detect_rrn() -> None:
     assert any(i.pii_type == PiiType.RRN for i in items)
 
 
+def test_detect_labeled_name_and_address() -> None:
+    text = "성명: 홍길동  주소: 서울특별시 강남구 테헤란로 123"
+    items = detect_in_text(text, unit_index=0, bbox=BBox(0, 0, 200, 20))
+    names = [i for i in items if i.pii_type == PiiType.NAME]
+    addrs = [i for i in items if i.pii_type == PiiType.ADDRESS]
+    assert any("홍길동" in i.text for i in names)
+    assert any("강남구" in i.text or "테헤란로" in i.text for i in addrs)
+
+
+def test_detect_name_nim_suffix() -> None:
+    items = detect_in_text(
+        "김철수님께서 방문하셨습니다.",
+        unit_index=0,
+        bbox=BBox(0, 0, 100, 20),
+    )
+    assert any(i.pii_type == PiiType.NAME and "김철수" in i.text for i in items)
+
+
+def test_detect_sido_address() -> None:
+    items = detect_in_text(
+        "배송은 부산광역시 해운대구 우동 1234번지입니다.",
+        unit_index=0,
+        bbox=BBox(0, 0, 100, 20),
+    )
+    assert any(i.pii_type == PiiType.ADDRESS for i in items)
+
+
+def test_detect_name_rejects_common_words() -> None:
+    items = detect_in_text(
+        "이상의 내용은 정보 보호를 위한 안내입니다.",
+        unit_index=0,
+        bbox=BBox(0, 0, 100, 20),
+    )
+    names = [i.text for i in items if i.pii_type == PiiType.NAME]
+    assert "이상" not in names
+    assert "정보" not in names
+
+
+def test_joined_spans_detect_split_fields() -> None:
+    spans = [
+        ExtractedSpan(0, "이름:", BBox(0, 0, 40, 20)),
+        ExtractedSpan(0, "박영희", BBox(40, 0, 100, 20)),
+        ExtractedSpan(0, "주소:", BBox(0, 30, 40, 50)),
+        ExtractedSpan(0, "경기도 성남시 분당구 판교로 10", BBox(40, 30, 300, 50)),
+    ]
+    items = detect_in_spans(spans)
+    assert any(i.pii_type == PiiType.NAME and "박영희" in i.text for i in items)
+    assert any(i.pii_type == PiiType.ADDRESS and "분당구" in i.text for i in items)
+
+
 def test_session_confirm_cancel_ignore_type() -> None:
     session = DetectionSession()
     items = detect_in_text(

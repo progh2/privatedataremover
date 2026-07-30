@@ -20,15 +20,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from privatedataremover.core.llm import probe_connection
-from privatedataremover.core.settings import AppSettings, LlmProvider
+from privatedataremover.core.llm import list_ollama_models, probe_connection
+from privatedataremover.core.settings import AppSettings, LlmProvider, coerce_provider
 
 
 class SettingsDialog(QDialog):
     def __init__(self, settings: AppSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("설정")
-        self.resize(560, 420)
+        self.resize(560, 460)
         self._settings = settings
 
         self.provider_combo = QComboBox()
@@ -43,7 +43,12 @@ class SettingsDialog(QDialog):
 
         # Ollama
         self.ollama_url = QLineEdit()
-        self.ollama_model = QLineEdit()
+        self.ollama_model = QComboBox()
+        self.ollama_model.setEditable(True)
+        self.ollama_model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.ollama_model.setMinimumWidth(220)
+        self.btn_refresh_ollama = QPushButton("모델 목록 불러오기")
+        self.btn_refresh_ollama.clicked.connect(self._refresh_ollama_models)
 
         # OpenAI
         self.openai_url = QLineEdit()
@@ -79,7 +84,13 @@ class SettingsDialog(QDialog):
         ollama_box = QGroupBox("Ollama")
         ollama_form = QFormLayout(ollama_box)
         ollama_form.addRow("Base URL", self.ollama_url)
-        ollama_form.addRow("모델", self.ollama_model)
+        model_row = QHBoxLayout()
+        model_row.addWidget(self.ollama_model, stretch=1)
+        model_row.addWidget(self.btn_refresh_ollama)
+        ollama_form.addRow("모델", model_row)
+        ollama_form.addRow(
+            QLabel("「모델 목록 불러오기」로 로컬 Ollama에 설치된 모델을 선택하세요.")
+        )
         llm_form.addRow(ollama_box)
 
         openai_box = QGroupBox("OpenAI")
@@ -146,13 +157,24 @@ class SettingsDialog(QDialog):
         row.addWidget(toggle)
         return wrap
 
+    def _set_ollama_model_text(self, model: str) -> None:
+        model = (model or "").strip()
+        if not model:
+            return
+        idx = self.ollama_model.findText(model)
+        if idx < 0:
+            self.ollama_model.addItem(model)
+            idx = self.ollama_model.findText(model)
+        self.ollama_model.setCurrentIndex(max(0, idx))
+        self.ollama_model.setEditText(model)
+
     def _load_into_form(self) -> None:
         s = self._settings
-        idx = self.provider_combo.findData(s.llm_provider)
+        idx = self.provider_combo.findData(s.provider)
         self.provider_combo.setCurrentIndex(max(0, idx))
         self.local_only.setChecked(s.local_only)
         self.ollama_url.setText(s.ollama_base_url)
-        self.ollama_model.setText(s.ollama_model)
+        self._set_ollama_model_text(s.ollama_model or "llama3.2")
         self.openai_url.setText(s.openai_base_url)
         self.openai_key.setText(s.openai_api_key)
         self.openai_model.setText(s.openai_model)
@@ -161,8 +183,44 @@ class SettingsDialog(QDialog):
         self.tesseract_cmd.setText(s.tesseract_cmd)
         self.ocr_languages.setText(s.ocr_languages)
 
+    def _refresh_ollama_models(self) -> None:
+        base = self.ollama_url.text().strip() or "http://localhost:11434"
+        current = self.ollama_model.currentText().strip()
+        self.status_label.setText("Ollama 모델 목록 조회 중…")
+        self.status_label.repaint()
+        try:
+            models = list_ollama_models(base)
+        except Exception as exc:  # noqa: BLE001
+            self.status_label.setText(
+                f'<span style="color:#b00020">모델 목록 실패: {exc}</span>'
+            )
+            QMessageBox.warning(
+                self,
+                "Ollama 모델",
+                f"모델 목록을 가져오지 못했습니다.\nOllama가 실행 중인지 확인하세요.\n\n{exc}",
+            )
+            return
+
+        self.ollama_model.blockSignals(True)
+        self.ollama_model.clear()
+        if models:
+            self.ollama_model.addItems(models)
+            self.status_label.setText(
+                f'<span style="color:#0a7a2f">모델 {len(models)}개 불러옴</span>'
+            )
+        else:
+            self.status_label.setText(
+                '<span style="color:#b00020">설치된 모델이 없습니다. '
+                "`ollama pull …` 후 다시 시도하세요.</span>"
+            )
+        self.ollama_model.blockSignals(False)
+
+        if current:
+            self._set_ollama_model_text(current)
+        elif models:
+            self.ollama_model.setCurrentIndex(0)
+
     def _on_local_only_toggled(self, checked: bool) -> None:
-        # Soft-disable cloud fields visually
         for w in (
             self.openai_url,
             self.openai_key,
@@ -188,10 +246,10 @@ class SettingsDialog(QDialog):
 
     def _collect(self) -> AppSettings:
         return AppSettings(
-            llm_provider=self.provider_combo.currentData(),
+            llm_provider=coerce_provider(self.provider_combo.currentData()),
             local_only=self.local_only.isChecked(),
             ollama_base_url=self.ollama_url.text().strip() or "http://localhost:11434",
-            ollama_model=self.ollama_model.text().strip() or "llama3.2",
+            ollama_model=self.ollama_model.currentText().strip() or "llama3.2",
             openai_base_url=self.openai_url.text().strip() or "https://api.openai.com/v1",
             openai_api_key=self.openai_key.text().strip(),
             openai_model=self.openai_model.text().strip() or "gpt-4o-mini",
@@ -211,12 +269,18 @@ class SettingsDialog(QDialog):
         self.status_label.setText(
             f'<span style="color:{color}">{result.message}</span>'
         )
+        if result.ok and draft.provider == LlmProvider.OLLAMA:
+            # Keep selection; refresh list quietly
+            try:
+                self._refresh_ollama_models()
+            except Exception:  # noqa: BLE001
+                pass
         if not result.ok:
             QMessageBox.warning(self, "연결 테스트", result.message)
 
     def _on_accept(self) -> None:
         draft = self._collect()
-        if draft.local_only and draft.llm_provider != LlmProvider.OLLAMA:
+        if draft.local_only and draft.provider != LlmProvider.OLLAMA:
             QMessageBox.warning(
                 self,
                 "로컬 전용 모드",

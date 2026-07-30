@@ -77,21 +77,32 @@ def clone_item(item: DetectionItem) -> DetectionItem:
 
 
 def snapshot_from_session(session: Any, *, label: str = "") -> SessionSnapshot:
+    regions: list[tuple[int | None, BBox]] = []
+    for page, box in getattr(session.rules, "ignored_regions", []):
+        regions.append(
+            (
+                page,
+                BBox(box.x0, box.y0, box.x1, box.y1),
+            )
+        )
     return SessionSnapshot(
         items=[clone_item(i) for i in session.items],
         ignored_types=set(session.rules.ignored_types),
         ignored_texts=set(session.rules.ignored_texts),
         cancelled_ids=set(session.rules.cancelled_ids),
-        ignored_regions=list(getattr(session.rules, "ignored_regions", [])),
+        ignored_regions=regions,
         label=label,
     )
 
 
 def restore_session(session: Any, snap: SessionSnapshot) -> None:
+    regions: list[tuple[int | None, BBox]] = []
+    for page, box in snap.ignored_regions:
+        regions.append((page, BBox(box.x0, box.y0, box.x1, box.y1)))
     session.items = [clone_item(i) for i in snap.items]
     session.rules = SessionIgnoreRules(
         ignored_types=set(snap.ignored_types),
         ignored_texts=set(snap.ignored_texts),
         cancelled_ids=set(snap.cancelled_ids),
-        ignored_regions=list(snap.ignored_regions),
+        ignored_regions=regions,
     )

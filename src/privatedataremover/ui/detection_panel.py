@@ -103,6 +103,17 @@ class DetectionPanel(QWidget):
     def filter_status_value(self):
         return self.filter_status.currentData()
 
+    def show_all_types(self) -> None:
+        """Switch the type filter to 모든 유형 (fires refresh callback)."""
+        if self.filter_type.currentIndex() != 0:
+            self.filter_type.setCurrentIndex(0)
+
+    def show_all_statuses(self) -> None:
+        """Switch the status filter to 모든 상태 (fires refresh callback)."""
+        idx = self.filter_status.findData("all")
+        if idx >= 0 and self.filter_status.currentIndex() != idx:
+            self.filter_status.setCurrentIndex(idx)
+
     def populate(self, items: list[DetectionItem], selected_id: str | None = None) -> None:
         self.list.blockSignals(True)
         self.list.clear()
@@ -117,15 +128,26 @@ class DetectionPanel(QWidget):
             self.list.addItem(lw)
             if selected_id and item.id == selected_id:
                 select_row = i
-        self.list.blockSignals(False)
+        # Keep signals blocked while restoring the selection: emitting
+        # selection_changed here re-enters the main window's refresh and
+        # recurses back into populate() until the stack overflows.
         if select_row >= 0:
             self.list.setCurrentRow(select_row)
+            self.list.scrollToItem(self.list.item(select_row))
+        self.list.blockSignals(False)
 
     def current_id(self) -> str | None:
         item = self.list.currentItem()
         if not item:
             return None
         return item.data(Qt.ItemDataRole.UserRole)
+
+    def ordered_ids(self) -> list[str]:
+        """Item ids in current display order (top to bottom)."""
+        return [
+            self.list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self.list.count())
+        ]
 
     def _on_current_changed(self, current: QListWidgetItem | None, _prev) -> None:
         if current:
